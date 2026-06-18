@@ -12,7 +12,7 @@
 
 #include "ecrt.h"
 
-/* 共 6 个 PDO entry：3 个输出，3 个输入。 */
+/* 当前业务代码注册 6 个关心的 PDO entry，其它默认 PDO entry 保持映射但不读写。 */
 #define DRIVE_PDO_REG_COUNT 6
 
 /* 主站写入伺服 RxPDO 的数据。 */
