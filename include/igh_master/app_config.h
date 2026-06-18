@@ -14,11 +14,11 @@
  * 上机前需要按实际设备修改。通常可以用下面命令读取：
  *   ethercat slaves -v
  */
-#define MASTER_INDEX        0
-#define DRIVE_ALIAS         0
-#define DRIVE_POSITION      0
-#define DRIVE_VENDOR_ID     0x00000000u
-#define DRIVE_PRODUCT_CODE  0x00000000u
+#define MASTER_INDEX 0
+#define DRIVE_ALIAS 0
+#define DRIVE_POSITION 0
+#define DRIVE_VENDOR_ID 0x00000000u
+#define DRIVE_PRODUCT_CODE 0x00000000u
 
 /*
  * 通用 CiA 402 PDO 布局：
@@ -28,8 +28,8 @@
  * 如果伺服 ESI 或 "ethercat pdos" 显示的 PDO assignment object 不同，
  * 需要同步修改这里的 PDO 编号。
  */
-#define DRIVE_RXPDO_INDEX   0x1600
-#define DRIVE_TXPDO_INDEX   0x1A00
+#define DRIVE_RXPDO_INDEX 0x1600
+#define DRIVE_TXPDO_INDEX 0x1A00
 
 /*
  * 1 ms EtherCAT 通讯周期，使用 DC SYNC0。
@@ -38,11 +38,11 @@
  * 较常见的值，但实际值应以 ESI XML 中的 Device -> Dc -> AssignActivate
  * 为准。
  */
-#define CYCLE_TIME_NS       1000000u
-#define DC_ASSIGN_ACTIVATE  0x0300u
-#define DC_SYNC0_SHIFT_NS   0
+#define CYCLE_TIME_NS 1000000u
+#define DC_ASSIGN_ACTIVATE 0x0300u
+#define DC_SYNC0_SHIFT_NS 0
 
 /* 循环任务中的诊断打印周期。 */
-#define PRINT_PERIOD_NS     5000000000ULL
+#define PRINT_PERIOD_NS 5000000000ULL
 
 #endif

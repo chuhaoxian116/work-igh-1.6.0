@@ -44,9 +44,8 @@ void ethercat_master_app_init(ethercat_master_app_t *app);
 int ethercat_master_app_configure(ethercat_master_app_t *app);
 
 /* 执行 1 ms 周期任务，直到 keep_running 变为 0。 */
-void ethercat_master_app_run(
-    ethercat_master_app_t *app,
-    volatile sig_atomic_t *keep_running);
+void ethercat_master_app_run(ethercat_master_app_t *app,
+                             volatile sig_atomic_t *keep_running);
 
 /* 释放 IgH master，并清空应用状态。 */
 void ethercat_master_app_release(ethercat_master_app_t *app);

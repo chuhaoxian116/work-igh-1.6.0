@@ -15,15 +15,13 @@
 /* 只在 signal_handler() 中更新，使用 sig_atomic_t 即可。 */
 static volatile sig_atomic_t keep_running = 1;
 
-static void signal_handler(int sig)
-{
+static void signal_handler(int sig) {
     (void)sig;
     keep_running = 0;
 }
 
 /* 支持 Ctrl+C 或服务停止信号，让周期循环可以干净退出。 */
-static void install_signal_handlers(void)
-{
+static void install_signal_handlers(void) {
     struct sigaction sa;
 
     memset(&sa, 0, sizeof(sa));
@@ -37,8 +35,7 @@ static void install_signal_handlers(void)
  *
  * 这样可以降低后续 1 ms 任务中发生缺页中断的概率。
  */
-static void prefault_stack(void)
-{
+static void prefault_stack(void) {
     volatile unsigned char dummy[MAX_SAFE_STACK];
     size_t i;
 
@@ -53,15 +50,13 @@ static void prefault_stack(void)
  * 如果没有 root 权限或系统 limits 配置不足，这些调用可能失败；程序会继续
  * 运行并打印 warning，方便开发阶段调试。
  */
-static void setup_realtime_process(void)
-{
+static void setup_realtime_process(void) {
     struct sched_param param;
 
     memset(&param, 0, sizeof(param));
     param.sched_priority = sched_get_priority_max(SCHED_FIFO);
     if (sched_setscheduler(0, SCHED_FIFO, &param) == -1) {
-        fprintf(stderr, "warning: sched_setscheduler failed: %s\n",
-            strerror(errno));
+        fprintf(stderr, "warning: sched_setscheduler failed: %s\n", strerror(errno));
     }
 
     if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
@@ -71,8 +66,7 @@ static void setup_realtime_process(void)
     prefault_stack();
 }
 
-int main(void)
-{
+int main(void) {
     ethercat_master_app_t app;
 
     /*
