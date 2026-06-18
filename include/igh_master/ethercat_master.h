@@ -1,12 +1,25 @@
 #ifndef IGH_MASTER_ETHERCAT_MASTER_H
 #define IGH_MASTER_ETHERCAT_MASTER_H
 
+/*
+ * IgH 主站应用层封装。
+ *
+ * 其它模块通过这里的 API 使用主站能力，尽量不直接调用 ecrt_*。
+ * 这样可以把主站初始化、DC 同步、周期性 process data 处理集中管理。
+ */
+
 #include <signal.h>
 #include <stdint.h>
 
 #include "ecrt.h"
 #include "igh_master/drive_pdo.h"
 
+/*
+ * 单主站、单 domain、单 CiA 402 伺服的运行状态。
+ *
+ * master/domain/drive 的状态快照会被缓存下来，只在状态变化时打印，
+ * 避免 1 ms 循环持续刷屏。
+ */
 typedef struct {
     ec_master_t *master;
     ec_domain_t *domain;
@@ -21,11 +34,21 @@ typedef struct {
     drive_outputs_t outputs;
 } ethercat_master_app_t;
 
+/* 清零运行期指针、状态、offset 和输出值。 */
 void ethercat_master_app_init(ethercat_master_app_t *app);
+
+/*
+ * 请求 IgH master，配置伺服 PDO/DC，激活 master，并获取 domain
+ * process data 指针。
+ */
 int ethercat_master_app_configure(ethercat_master_app_t *app);
+
+/* 执行 1 ms 周期任务，直到 keep_running 变为 0。 */
 void ethercat_master_app_run(
     ethercat_master_app_t *app,
     volatile sig_atomic_t *keep_running);
+
+/* 释放 IgH master，并清空应用状态。 */
 void ethercat_master_app_release(ethercat_master_app_t *app);
 
 #endif

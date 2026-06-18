@@ -1,13 +1,13 @@
-# IgH EtherCAT Master Demo
+# IgH EtherCAT 主站示例
 
-This project is a minimal userspace IgH EtherCAT master application.
+这是一个最小化的用户态 IgH EtherCAT 主站工程。
 
-- Cycle time: 1 ms
-- Distributed clocks: enabled with SYNC0
-- Control behavior: no drive enabling/control sequence yet
-- Runtime output: prints PDO data every 5 seconds
+- 通讯周期：1 ms
+- 分布式时钟：启用 SYNC0
+- 控制逻辑：当前不做使能和运动控制
+- 运行输出：每 5 秒打印一次 PDO 数据
 
-## Structure
+## 目录结构
 
 ```text
 myproject/
@@ -22,14 +22,14 @@ myproject/
     └── main.c
 ```
 
-- `app_config.h`: slave identity, position, PDO indexes, and DC parameters
-- `drive_pdo.*`: CiA 402 PDO map, domain registration, PDO read/write helpers
-- `ethercat_master.*`: IgH master setup, DC setup, domain processing, 1 ms loop
-- `main.c`: signal handling and realtime process setup
+- `app_config.h`：从站身份、站号、PDO 编号、DC 参数
+- `drive_pdo.*`：CiA 402 PDO 映射、domain 注册、PDO 读写封装
+- `ethercat_master.*`：IgH 主站初始化、DC 配置、domain 处理、1 ms 循环
+- `main.c`：信号处理和实时进程设置
 
-## Before Running On Hardware
+## 上机前配置
 
-Edit `include/igh_master/app_config.h`:
+先修改 `include/igh_master/app_config.h`：
 
 ```c
 #define DRIVE_POSITION      0
@@ -38,17 +38,17 @@ Edit `include/igh_master/app_config.h`:
 #define DC_ASSIGN_ACTIVATE  0x0300u
 ```
 
-Use the values reported by:
+从站的 Vendor ID、Product Code、站号等信息可以通过下面命令查看：
 
 ```sh
 ethercat slaves -v
 ethercat pdos
 ```
 
-`DC_ASSIGN_ACTIVATE` is vendor-specific. Check the drive ESI XML under
-`Device -> Dc -> AssignActivate`.
+`DC_ASSIGN_ACTIVATE` 和厂家有关，建议以伺服 ESI XML 中
+`Device -> Dc -> AssignActivate` 的值为准。
 
-## PDO Layout
+## PDO 布局
 
 RxPDO:
 
@@ -66,7 +66,7 @@ uint16_t status_word;          /* 0x6041:00 */
 int8_t operation_mode_display; /* 0x6061:00 */
 ```
 
-## Build
+## 编译
 
 ```sh
 cd /home/js/igh/myproject
@@ -74,13 +74,13 @@ cmake -S . -B build
 cmake --build build
 ```
 
-## Run
+## 运行
 
-The IgH master kernel modules and master service must already be running.
+运行前需要确认 IgH 主站内核模块和主站服务已经启动。
 
 ```sh
 cd /home/js/igh/myproject
 sudo ./build/igh_master
 ```
 
-Stop with `Ctrl+C`.
+按 `Ctrl+C` 停止程序。

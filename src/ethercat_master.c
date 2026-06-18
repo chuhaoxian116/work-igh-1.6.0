@@ -10,11 +10,13 @@
 #define NSEC_PER_SEC 1000000000LL
 #define PRINT_PERIOD_CYCLES (PRINT_PERIOD_NS / CYCLE_TIME_NS)
 
+/* 将 monotonic timespec 转为纳秒，供 IgH application time 使用。 */
 static int64_t timespec_to_ns(const struct timespec *ts)
 {
     return (int64_t)ts->tv_sec * NSEC_PER_SEC + ts->tv_nsec;
 }
 
+/* 推进绝对唤醒时间，并保持 tv_nsec 在合法范围内。 */
 static void add_ns(struct timespec *ts, int64_t ns)
 {
     ts->tv_nsec += ns;
@@ -24,6 +26,7 @@ static void add_ns(struct timespec *ts, int64_t ns)
     }
 }
 
+/* 只在 master 状态变化时打印，避免每个周期都刷日志。 */
 static void check_master_state(ethercat_master_app_t *app)
 {
     ec_master_state_t state;
@@ -42,6 +45,7 @@ static void check_master_state(ethercat_master_app_t *app)
     app->master_state = state;
 }
 
+/* 打印 domain working counter 和状态变化。 */
 static void check_domain_state(ethercat_master_app_t *app)
 {
     ec_domain_state_t state;
@@ -57,6 +61,7 @@ static void check_domain_state(ethercat_master_app_t *app)
     app->domain_state = state;
 }
 
+/* 打印从站 online、operational、AL state 的变化。 */
 static void check_drive_state(ethercat_master_app_t *app)
 {
     ec_slave_config_state_t state;
@@ -75,6 +80,7 @@ static void check_drive_state(ethercat_master_app_t *app)
     app->drive_state = state;
 }
 
+/* 每 5 秒诊断打印一次当前 process data 快照。 */
 static void print_drive_data(const ethercat_master_app_t *app, uint64_t cycle)
 {
     drive_inputs_t inputs =
@@ -101,6 +107,10 @@ int ethercat_master_app_configure(ethercat_master_app_t *app)
 {
     ec_pdo_entry_reg_t domain_regs[DRIVE_PDO_REG_COUNT + 1];
 
+    /*
+     * 所有 ecrt_* 配置调用都放在 activate 之前。ecrt_master_activate()
+     * 之后，周期任务中只做实时友好的 process data 和 DC 同步调用。
+     */
     app->master = ecrt_request_master(MASTER_INDEX);
     if (!app->master) {
         fprintf(stderr, "failed to request EtherCAT master %u\n",
@@ -124,6 +134,7 @@ int ethercat_master_app_configure(ethercat_master_app_t *app)
         return -1;
     }
 
+    /* PDO assignment/mapping 必须在 domain 注册之前完成。 */
     printf("configuring PDOs...\n");
     if (ecrt_slave_config_pdos(app->drive_config, EC_END,
             drive_pdo_syncs())) {
@@ -137,6 +148,9 @@ int ethercat_master_app_configure(ethercat_master_app_t *app)
         return -1;
     }
 
+    /*
+     * 选择伺服作为 DC 参考时钟，并将 SYNC0 配置为和用户态循环一致的周期。
+     */
     if (ecrt_master_select_reference_clock(app->master, app->drive_config)) {
         fprintf(stderr, "failed to select DC reference clock\n");
         return -1;
@@ -154,6 +168,7 @@ int ethercat_master_app_configure(ethercat_master_app_t *app)
         return -1;
     }
 
+    /* process data 指针在 master 成功激活后才有效。 */
     app->domain_pd = ecrt_domain_data(app->domain);
     if (!app->domain_pd) {
         fprintf(stderr, "failed to get domain data pointer\n");
@@ -173,6 +188,10 @@ void ethercat_master_app_run(
     clock_gettime(CLOCK_MONOTONIC, &wakeup_time);
     add_ns(&wakeup_time, CYCLE_TIME_NS);
 
+    /*
+     * 使用绝对时间睡眠，避免周期误差累积。目标唤醒时间也会传给 IgH 作为
+     * application time，让 DC 同步更稳定。
+     */
     while (*keep_running) {
         int ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME,
             &wakeup_time, NULL);
@@ -190,6 +209,7 @@ void ethercat_master_app_run(
         ecrt_master_receive(app->master);
         ecrt_domain_process(app->domain);
 
+        /* 限制终端打印频率；EtherCAT 循环仍然保持 1 ms 执行。 */
         if (cycle % PRINT_PERIOD_CYCLES == 0) {
             check_master_state(app);
             check_domain_state(app);
@@ -200,6 +220,10 @@ void ethercat_master_app_run(
         drive_pdo_write_outputs(app->domain_pd, &app->pdo_offsets,
             &app->outputs);
 
+        /*
+         * 发送 process data 帧之前先排队 DC 同步报文。参考时钟会跟随上面设置
+         * 的 application time。
+         */
         ecrt_master_sync_reference_clock(app->master);
         ecrt_master_sync_slave_clocks(app->master);
 
