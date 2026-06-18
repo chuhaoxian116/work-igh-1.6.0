@@ -1,6 +1,8 @@
 #include "igh_master/ethercat_master.h"
 
 #include <errno.h>
+#include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -8,7 +10,18 @@
 #include "igh_master/app_config.h"
 
 #define NSEC_PER_SEC 1000000000LL
+#define TWO_PI 6.28318530717958647692
 #define PRINT_PERIOD_CYCLES (PRINT_PERIOD_NS / CYCLE_TIME_NS)
+#define DC_MONITOR_PERIOD_CYCLES (DC_MONITOR_PERIOD_NS / CYCLE_TIME_NS)
+#define SINE_PERIOD_CYCLES (SINE_PERIOD_NS / CYCLE_TIME_NS)
+
+enum {
+    CONTROL_WAIT_STATUS = 0,
+    CONTROL_ENABLE_06,
+    CONTROL_ENABLE_07,
+    CONTROL_ENABLE_15,
+    CONTROL_SINE_MOTION,
+};
 
 /* 将 monotonic timespec 转为纳秒，供 IgH application time 使用。 */
 static int64_t timespec_to_ns(const struct timespec *ts) {
@@ -21,6 +34,28 @@ static void add_ns(struct timespec *ts, int64_t ns) {
     while (ts->tv_nsec >= NSEC_PER_SEC) {
         ts->tv_nsec -= NSEC_PER_SEC;
         ts->tv_sec++;
+    }
+}
+
+static void ns_to_timespec(uint64_t ns, struct timespec *ts) {
+    ts->tv_sec = ns / NSEC_PER_SEC;
+    ts->tv_nsec = ns % NSEC_PER_SEC;
+}
+
+static const char *control_state_name(int state) {
+    switch (state) {
+    case CONTROL_WAIT_STATUS:
+        return "wait_status";
+    case CONTROL_ENABLE_06:
+        return "enable_06";
+    case CONTROL_ENABLE_07:
+        return "enable_07";
+    case CONTROL_ENABLE_15:
+        return "enable_15";
+    case CONTROL_SINE_MOTION:
+        return "sine_motion";
+    default:
+        return "unknown";
     }
 }
 
@@ -75,20 +110,205 @@ static void check_drive_state(ethercat_master_app_t *app) {
     app->drive_state = state;
 }
 
-/* 每 5 秒诊断打印一次当前 process data 快照。 */
-static void print_drive_data(const ethercat_master_app_t *app, uint64_t cycle) {
-    drive_inputs_t inputs = drive_pdo_read_inputs(app->domain_pd, &app->pdo_offsets);
+static void hold_actual_position(ethercat_master_app_t *app,
+                                 const drive_inputs_t *inputs, uint16_t control_word) {
+    app->outputs.target_position = inputs->actual_position;
+    app->outputs.control_word = control_word;
+    app->outputs.operation_mode = DRIVE_OPERATION_MODE;
+}
 
-    printf("cycle=%llu target_position=%d control_word=0x%04X "
-           "operation_mode=%d actual_position=%d status_word=0x%04X "
-           "operation_mode_display=%d\n",
-           (unsigned long long)cycle, app->outputs.target_position,
-           app->outputs.control_word, app->outputs.operation_mode,
-           inputs.actual_position, inputs.status_word, inputs.operation_mode_display);
+static void set_control_state(ethercat_master_app_t *app, int state) {
+    app->control_state = state;
+    app->control_state_cycles = 0;
+}
+
+/*
+ * 简单 CiA 402 控制状态机。
+ *
+ * 这里按现场要求执行 0x06 -> 0x07 -> 0x15。每个步骤保持
+ * ENABLE_STEP_CYCLES 个周期。使能完成后，先锁存当前实际位置作为 base，
+ * 然后执行 base -> base + 30000 -> base 的平滑正弦位置给定。
+ */
+static void update_drive_control(ethercat_master_app_t *app,
+                                 const drive_inputs_t *inputs) {
+#if ENABLE_DRIVE_CONTROL
+    if (inputs->status_word == 0) {
+        hold_actual_position(app, inputs, 0x0000);
+        return;
+    }
+
+    switch (app->control_state) {
+    case CONTROL_WAIT_STATUS:
+        hold_actual_position(app, inputs, 0x0006);
+        set_control_state(app, CONTROL_ENABLE_06);
+        break;
+
+    case CONTROL_ENABLE_06:
+        hold_actual_position(app, inputs, 0x0006);
+        if (++app->control_state_cycles >= ENABLE_STEP_CYCLES) {
+            set_control_state(app, CONTROL_ENABLE_07);
+        }
+        break;
+
+    case CONTROL_ENABLE_07:
+        hold_actual_position(app, inputs, 0x0007);
+        if (++app->control_state_cycles >= ENABLE_STEP_CYCLES) {
+            set_control_state(app, CONTROL_ENABLE_15);
+        }
+        break;
+
+    case CONTROL_ENABLE_15:
+        hold_actual_position(app, inputs, 0x000f);
+        if (++app->control_state_cycles >= ENABLE_STEP_CYCLES) {
+            app->sine_base_position = inputs->actual_position;
+            app->motion_cycles = 0;
+            set_control_state(app, CONTROL_SINE_MOTION);
+        }
+        break;
+
+    case CONTROL_SINE_MOTION: {
+        double phase = TWO_PI * (double)app->motion_cycles / (double)SINE_PERIOD_CYCLES;
+        double offset = (1.0 - cos(phase)) * 0.5 * SINE_RANGE_COUNTS;
+
+        app->outputs.target_position =
+            app->sine_base_position + (int32_t)(offset + 0.5);
+        app->outputs.control_word = 0x000f;
+        app->outputs.operation_mode = DRIVE_OPERATION_MODE;
+        app->motion_cycles = (app->motion_cycles + 1) % SINE_PERIOD_CYCLES;
+        break;
+    }
+
+    default:
+        set_control_state(app, CONTROL_WAIT_STATUS);
+        hold_actual_position(app, inputs, 0x0000);
+        break;
+    }
+#else
+    hold_actual_position(app, inputs, 0x0000);
+#endif
+}
+
+static void update_dc_monitor(ethercat_master_app_t *app, uint64_t cycle) {
+    uint32_t diff_ns;
+
+    if (cycle > 0 && cycle % DC_MONITOR_PERIOD_CYCLES == 0) {
+        diff_ns = ecrt_master_sync_monitor_process(app->master);
+        if (pthread_mutex_trylock(&app->debug_lock) == 0) {
+            if (diff_ns != (uint32_t)-1) {
+                app->debug_snapshot.dc_sync_diff_ns = diff_ns;
+                app->debug_snapshot.dc_sync_diff_valid = 1;
+            } else {
+                app->debug_snapshot.dc_sync_diff_valid = 0;
+            }
+            pthread_mutex_unlock(&app->debug_lock);
+        }
+    }
+}
+
+static void queue_dc_monitor(ethercat_master_app_t *app, uint64_t cycle) {
+    if (cycle % DC_MONITOR_PERIOD_CYCLES == 0) {
+        ecrt_master_sync_monitor_queue(app->master);
+    }
+}
+
+static void update_debug_snapshot(ethercat_master_app_t *app, uint64_t cycle,
+                                  const drive_inputs_t *inputs) {
+    if (pthread_mutex_trylock(&app->debug_lock) != 0) {
+        return;
+    }
+
+    app->debug_snapshot.cycle = cycle;
+    app->debug_snapshot.inputs = *inputs;
+    app->debug_snapshot.outputs = app->outputs;
+    app->debug_snapshot.control_state = app->control_state;
+    app->debug_snapshot.sine_base_position = app->sine_base_position;
+
+    pthread_mutex_unlock(&app->debug_lock);
+}
+
+#if DEBUG_READ_SYNC_LOST_SDO
+static int read_sync_lost_count(ethercat_master_app_t *app, uint32_t *value) {
+    uint8_t data[4] = {0};
+    size_t result_size = 0;
+    uint32_t abort_code = 0;
+    int ret;
+
+    ret = ecrt_master_sdo_upload(app->master, DRIVE_POSITION, SYNC_LOST_COUNT_INDEX,
+                                 SYNC_LOST_COUNT_SUBINDEX, data, sizeof(data),
+                                 &result_size, &abort_code);
+    if (ret) {
+        return ret;
+    }
+
+    if (result_size == 1) {
+        *value = data[0];
+    } else if (result_size == 2) {
+        *value = (uint32_t)data[0] | ((uint32_t)data[1] << 8);
+    } else {
+        *value = (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+                 ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+    }
+
+    return 0;
+}
+#endif
+
+static void *debug_thread_main(void *arg) {
+    ethercat_master_app_t *app = (ethercat_master_app_t *)arg;
+    struct timespec sleep_time;
+
+    ns_to_timespec(DEBUG_PRINT_PERIOD_NS, &sleep_time);
+
+    while (*app->debug_keep_running) {
+        ethercat_debug_snapshot_t snapshot;
+
+        nanosleep(&sleep_time, NULL);
+
+        pthread_mutex_lock(&app->debug_lock);
+        snapshot = app->debug_snapshot;
+        pthread_mutex_unlock(&app->debug_lock);
+
+        if (snapshot.dc_sync_diff_valid) {
+            printf("debug: cycle=%llu target_position=%d control_word=0x%04X "
+                   "operation_mode=%d actual_position=%d status_word=0x%04X "
+                   "operation_mode_display=%d control_state=%s "
+                   "sine_base_position=%d dc_sync_diff_ns=%u\n",
+                   (unsigned long long)snapshot.cycle, snapshot.outputs.target_position,
+                   snapshot.outputs.control_word, snapshot.outputs.operation_mode,
+                   snapshot.inputs.actual_position, snapshot.inputs.status_word,
+                   snapshot.inputs.operation_mode_display,
+                   control_state_name(snapshot.control_state),
+                   snapshot.sine_base_position, snapshot.dc_sync_diff_ns);
+        } else {
+            printf("debug: cycle=%llu target_position=%d control_word=0x%04X "
+                   "operation_mode=%d actual_position=%d status_word=0x%04X "
+                   "operation_mode_display=%d control_state=%s "
+                   "sine_base_position=%d dc_sync_diff_ns=N/A\n",
+                   (unsigned long long)snapshot.cycle, snapshot.outputs.target_position,
+                   snapshot.outputs.control_word, snapshot.outputs.operation_mode,
+                   snapshot.inputs.actual_position, snapshot.inputs.status_word,
+                   snapshot.inputs.operation_mode_display,
+                   control_state_name(snapshot.control_state),
+                   snapshot.sine_base_position);
+        }
+
+#if DEBUG_READ_SYNC_LOST_SDO
+        {
+            uint32_t sync_lost_count = 0;
+            if (read_sync_lost_count(app, &sync_lost_count) == 0) {
+                printf("debug: sync_lost_count=%u\n", sync_lost_count);
+            }
+        }
+#endif
+    }
+
+    return NULL;
 }
 
 void ethercat_master_app_init(ethercat_master_app_t *app) {
     memset(app, 0, sizeof(*app));
+    pthread_mutex_init(&app->debug_lock, NULL);
+    app->debug_lock_ready = 1;
 }
 
 int ethercat_master_app_configure(ethercat_master_app_t *app) {
@@ -163,6 +383,25 @@ int ethercat_master_app_configure(ethercat_master_app_t *app) {
     return 0;
 }
 
+int ethercat_master_app_start_debug_thread(ethercat_master_app_t *app,
+                                           volatile sig_atomic_t *keep_running) {
+    app->debug_keep_running = keep_running;
+    if (pthread_create(&app->debug_thread, NULL, debug_thread_main, app)) {
+        fprintf(stderr, "failed to create debug thread\n");
+        return -1;
+    }
+
+    app->debug_thread_running = 1;
+    return 0;
+}
+
+void ethercat_master_app_stop_debug_thread(ethercat_master_app_t *app) {
+    if (app->debug_thread_running) {
+        pthread_join(app->debug_thread, NULL);
+        app->debug_thread_running = 0;
+    }
+}
+
 void ethercat_master_app_run(ethercat_master_app_t *app,
                              volatile sig_atomic_t *keep_running) {
     struct timespec wakeup_time;
@@ -176,6 +415,7 @@ void ethercat_master_app_run(ethercat_master_app_t *app,
      * application time，让 DC 同步更稳定。
      */
     while (*keep_running) {
+        drive_inputs_t inputs;
         int ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup_time, NULL);
         if (ret) {
             if (ret == EINTR) {
@@ -191,15 +431,18 @@ void ethercat_master_app_run(ethercat_master_app_t *app,
         ecrt_master_receive(app->master);
         ecrt_domain_process(app->domain);
 
-        /* 限制终端打印频率；EtherCAT 循环仍然保持 1 ms 执行。 */
+        inputs = drive_pdo_read_inputs(app->domain_pd, &app->pdo_offsets);
+
         if (cycle % PRINT_PERIOD_CYCLES == 0) {
             check_master_state(app);
             check_domain_state(app);
             check_drive_state(app);
-            print_drive_data(app, cycle);
         }
 
+        update_dc_monitor(app, cycle);
+        update_drive_control(app, &inputs);
         drive_pdo_write_outputs(app->domain_pd, &app->pdo_offsets, &app->outputs);
+        update_debug_snapshot(app, cycle, &inputs);
 
         /*
          * 发送 process data 帧之前先排队 DC 同步报文。参考时钟会跟随上面设置
@@ -207,6 +450,7 @@ void ethercat_master_app_run(ethercat_master_app_t *app,
          */
         ecrt_master_sync_reference_clock(app->master);
         ecrt_master_sync_slave_clocks(app->master);
+        queue_dc_monitor(app, cycle);
 
         ecrt_domain_queue(app->domain);
         ecrt_master_send(app->master);
@@ -217,9 +461,15 @@ void ethercat_master_app_run(ethercat_master_app_t *app,
 }
 
 void ethercat_master_app_release(ethercat_master_app_t *app) {
+    ethercat_master_app_stop_debug_thread(app);
+
     if (app->master) {
         ecrt_release_master(app->master);
     }
 
-    ethercat_master_app_init(app);
+    if (app->debug_lock_ready) {
+        pthread_mutex_destroy(&app->debug_lock);
+    }
+
+    memset(app, 0, sizeof(*app));
 }

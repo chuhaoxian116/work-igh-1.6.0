@@ -32,6 +32,8 @@ target_include_directories(igh_master PRIVATE
 
 target_link_libraries(igh_master PRIVATE
     EtherCAT::EtherCAT
+    pthread
+    m
     rt
 )
 

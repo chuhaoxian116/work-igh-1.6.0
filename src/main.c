@@ -83,9 +83,15 @@ int main(void) {
 
     setup_realtime_process();
 
-    printf("starting 1 ms EtherCAT loop, printing every 5 s\n");
+    if (ethercat_master_app_start_debug_thread(&app, &keep_running)) {
+        ethercat_master_app_release(&app);
+        return 1;
+    }
+
+    printf("starting 1 ms EtherCAT loop\n");
     ethercat_master_app_run(&app, &keep_running);
 
+    ethercat_master_app_stop_debug_thread(&app);
     ethercat_master_app_release(&app);
     printf("stopped\n");
 
