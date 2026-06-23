@@ -15,7 +15,7 @@
 #define TWO_PI 6.28318530717958647692
 #define PRINT_PERIOD_CYCLES (PRINT_PERIOD_NS / CYCLE_TIME_NS)
 #define DC_MONITOR_PERIOD_CYCLES (DC_MONITOR_PERIOD_NS / CYCLE_TIME_NS)
-#define SINE_PERIOD_CYCLES (SINE_PERIOD_NS / CYCLE_TIME_NS)
+#define SINE_PERIOD_CYCLES (MOTION_PERIOD_NS / CYCLE_TIME_NS)
 #define COMMUNICATION_REPORT_PERIOD_CYCLES \
     (COMMUNICATION_REPORT_PERIOD_NS / CYCLE_TIME_NS)
 
@@ -126,8 +126,7 @@ static void print_communication_report(const ethercat_master_app_t *app,
     double avg_jitter_us = 0.0;
     double complete_percent = 0.0;
     double avg_dc_us = 0.0;
-    double peak_rate = (TWO_PI * 0.5) * (double)SINE_RANGE_COUNTS /
-                       ((double)SINE_PERIOD_NS / (double)NSEC_PER_SEC);
+    double peak_rate = (double)MOTION_PEAK_RATE_COUNTS_PER_SEC;
 
     if (stats->start_time_ns && stats->last_cycle_time_ns >= stats->start_time_ns) {
         elapsed_s = (double)(stats->last_cycle_time_ns - stats->start_time_ns) /
@@ -199,9 +198,9 @@ static void print_communication_report(const ethercat_master_app_t *app,
            inputs->status_word, (inputs->status_word & 0x1000) ? 1 : 0);
     printf("  模式 / 控制字     : %12d / 0x%04X\n",
            inputs->operation_mode_display, app->outputs.control_word);
-    printf("  目标位置范围      : base ~ base + %d pulse\n", SINE_RANGE_COUNTS);
+    printf("  目标位置范围      : base ~ base + %d pulse\n", MOTION_RANGE_COUNTS);
     printf("  运动周期          : %12.3f s\n",
-           (double)SINE_PERIOD_NS / (double)NSEC_PER_SEC);
+           (double)MOTION_PERIOD_NS / (double)NSEC_PER_SEC);
     printf("  最大目标变化率    : %12.3f pulse/s\n", peak_rate);
 
     printf("[主站与从站状态]\n");
@@ -341,7 +340,7 @@ static void update_drive_control(ethercat_master_app_t *app,
 
     case CONTROL_SINE_MOTION: {
         double phase = TWO_PI * (double)app->motion_cycles / (double)SINE_PERIOD_CYCLES;
-        double offset = (1.0 - cos(phase)) * 0.5 * SINE_RANGE_COUNTS;
+        double offset = (1.0 - cos(phase)) * 0.5 * MOTION_RANGE_COUNTS;
 
         app->outputs.target_position =
             app->sine_base_position + (int32_t)(offset + 0.5);
@@ -567,10 +566,9 @@ int ethercat_master_app_configure(ethercat_master_app_t *app) {
 
     printf("motion profile: range=[base, base+%d], period=%.3fs, "
            "peak_target_rate=%.3f pulse/s\n",
-           SINE_RANGE_COUNTS,
-           (double)SINE_PERIOD_NS / (double)NSEC_PER_SEC,
-           (TWO_PI * 0.5) * (double)SINE_RANGE_COUNTS /
-               ((double)SINE_PERIOD_NS / (double)NSEC_PER_SEC));
+           MOTION_RANGE_COUNTS,
+           (double)MOTION_PERIOD_NS / (double)NSEC_PER_SEC,
+           (double)MOTION_PEAK_RATE_COUNTS_PER_SEC);
 
     return 0;
 }

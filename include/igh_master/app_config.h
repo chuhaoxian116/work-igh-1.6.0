@@ -60,13 +60,23 @@
 #define ENABLE_STEP_CYCLES 1000ULL
 
 /*
- * 正弦运动参数。
+ * CSP 运动参数（SOEM 工程中有同名配置，修改时请保持两边一致）。
  *
- * 目标位置以使能完成时的实际位置为基准，在 0 到 30000 pulse 范围内
- * 做平滑正弦往复：base -> base + 30000 -> base。
+ * MOTION_RANGE_COUNTS：相对起始位置的最大行程，单位 pulse。
+ * MOTION_PEAK_RATE_COUNTS_PER_SEC：目标位置的峰值变化率，单位 pulse/s。
+ *
+ * 当前轨迹是平滑半余弦往复：base -> base + range -> base。轨迹周期由
+ * “行程”和“峰值速度”自动推导，无需手工换算；1 ms 周期下，50000
+ * pulse/s 对应峰值约 50 pulse/cycle。
  */
-#define SINE_RANGE_COUNTS 30000
-#define SINE_PERIOD_NS 10000000000ULL
+#define MOTION_RANGE_COUNTS 100000
+#define MOTION_PEAK_RATE_COUNTS_PER_SEC 50000
+
+/* pi * 1e9，用整数运算推导半余弦轨迹周期，避免配置文件依赖 libm。 */
+#define MOTION_PI_SCALED 3141592654ULL
+#define MOTION_PERIOD_NS                                                    \
+    ((MOTION_PI_SCALED * MOTION_RANGE_COUNTS) /                           \
+     MOTION_PEAK_RATE_COUNTS_PER_SEC)
 
 /*
  * 通信质量报告周期。
