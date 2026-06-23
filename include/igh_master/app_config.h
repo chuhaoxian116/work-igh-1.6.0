@@ -68,6 +68,16 @@
 #define SINE_RANGE_COUNTS 30000
 #define SINE_PERIOD_NS 10000000000ULL
 
+/*
+ * 通信质量报告周期。
+ *
+ * 运行期间每 60 秒打印一次累计通信质量；Ctrl+C 退出时再打印完整总报告。
+ */
+#define COMMUNICATION_REPORT_PERIOD_NS 60000000000ULL
+
+/* 实际周期超过标称周期的 150% 时，记为一次严重超周期。 */
+#define CYCLE_OVERRUN_LIMIT_NS ((CYCLE_TIME_NS * 3ULL) / 2ULL)
+
 /* DC 同步监视周期，使用 IgH sync monitor，单位 ns。 */
 #define DC_MONITOR_PERIOD_NS 1000000000ULL
 

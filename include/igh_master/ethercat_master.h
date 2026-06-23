@@ -31,6 +31,38 @@ typedef struct {
     int control_state;
 } ethercat_debug_snapshot_t;
 
+/*
+ * 通信质量累计统计。
+ *
+ * 周期线程是唯一写入者，分钟报告和退出报告也由周期线程打印，因此不需要
+ * 在 1 ms 热路径中增加互斥锁。domain_* 计数使用 IgH working-counter 状态，
+ * 用于区分完整、部分和完全无 process data 的周期。
+ */
+typedef struct {
+    uint64_t cycles;
+    uint64_t interval_samples;
+    uint64_t cycle_time_sum_ns;
+    uint64_t jitter_abs_sum_ns;
+    uint64_t severe_overruns;
+
+    uint64_t domain_complete_cycles;
+    uint64_t domain_incomplete_cycles;
+    uint64_t domain_zero_cycles;
+    uint32_t min_working_counter;
+    uint32_t max_working_counter;
+
+    uint64_t dc_valid_samples;
+    uint64_t dc_invalid_samples;
+    uint64_t dc_abs_sum_ns;
+    uint32_t max_dc_diff_ns;
+
+    int64_t start_time_ns;
+    int64_t last_cycle_time_ns;
+    int64_t min_cycle_ns;
+    int64_t max_cycle_ns;
+    int64_t max_abs_jitter_ns;
+} ethercat_quality_stats_t;
+
 typedef struct {
     ec_master_t *master;
     ec_domain_t *domain;
@@ -51,6 +83,7 @@ typedef struct {
     int debug_thread_running;
 
     ethercat_debug_snapshot_t debug_snapshot;
+    ethercat_quality_stats_t quality;
 
     int control_state;
     uint64_t control_state_cycles;

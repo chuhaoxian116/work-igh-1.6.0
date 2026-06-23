@@ -1,9 +1,11 @@
 #include "igh_master/ethercat_master.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -14,6 +16,8 @@
 #define PRINT_PERIOD_CYCLES (PRINT_PERIOD_NS / CYCLE_TIME_NS)
 #define DC_MONITOR_PERIOD_CYCLES (DC_MONITOR_PERIOD_NS / CYCLE_TIME_NS)
 #define SINE_PERIOD_CYCLES (SINE_PERIOD_NS / CYCLE_TIME_NS)
+#define COMMUNICATION_REPORT_PERIOD_CYCLES \
+    (COMMUNICATION_REPORT_PERIOD_NS / CYCLE_TIME_NS)
 
 enum {
     CONTROL_WAIT_STATUS = 0,
@@ -40,6 +44,175 @@ static void add_ns(struct timespec *ts, int64_t ns) {
 static void ns_to_timespec(uint64_t ns, struct timespec *ts) {
     ts->tv_sec = ns / NSEC_PER_SEC;
     ts->tv_nsec = ns % NSEC_PER_SEC;
+}
+
+/* CLOCK_MONOTONIC_RAW 不受 NTP 校时影响，适合统计真实调度周期。 */
+static int64_t monotonic_raw_ns(void) {
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC_RAW, &now);
+    return timespec_to_ns(&now);
+}
+
+/* 累计一次周期调度质量；首周期只建立时间基准，不计算间隔。 */
+static void quality_update_cycle(ethercat_master_app_t *app, int64_t now_ns) {
+    ethercat_quality_stats_t *stats = &app->quality;
+
+    stats->cycles++;
+    if (stats->start_time_ns == 0) {
+        stats->start_time_ns = now_ns;
+        stats->last_cycle_time_ns = now_ns;
+        return;
+    }
+
+    {
+        int64_t interval_ns = now_ns - stats->last_cycle_time_ns;
+        int64_t jitter_ns = llabs(interval_ns - (int64_t)CYCLE_TIME_NS);
+
+        stats->last_cycle_time_ns = now_ns;
+        stats->interval_samples++;
+        stats->cycle_time_sum_ns += (uint64_t)interval_ns;
+        stats->jitter_abs_sum_ns += (uint64_t)jitter_ns;
+
+        if (interval_ns < stats->min_cycle_ns) stats->min_cycle_ns = interval_ns;
+        if (interval_ns > stats->max_cycle_ns) stats->max_cycle_ns = interval_ns;
+        if (jitter_ns > stats->max_abs_jitter_ns) {
+            stats->max_abs_jitter_ns = jitter_ns;
+        }
+        if ((uint64_t)interval_ns > CYCLE_OVERRUN_LIMIT_NS) {
+            stats->severe_overruns++;
+        }
+    }
+}
+
+/* 将 IgH domain working-counter 状态转换为可累计的通信成功率。 */
+static void quality_update_domain(ethercat_master_app_t *app) {
+    ec_domain_state_t state;
+    ethercat_quality_stats_t *stats = &app->quality;
+
+    ecrt_domain_state(app->domain, &state);
+    if (state.working_counter < stats->min_working_counter) {
+        stats->min_working_counter = state.working_counter;
+    }
+    if (state.working_counter > stats->max_working_counter) {
+        stats->max_working_counter = state.working_counter;
+    }
+
+    switch (state.wc_state) {
+    case EC_WC_COMPLETE:
+        stats->domain_complete_cycles++;
+        break;
+    case EC_WC_INCOMPLETE:
+        stats->domain_incomplete_cycles++;
+        break;
+    default:
+        stats->domain_zero_cycles++;
+        break;
+    }
+}
+
+/*
+ * IgH 通信质量报告。
+ *
+ * 分钟报告和退出报告使用同一统计口径，便于与 SOEM 报告直接比较。
+ * 正弦轨迹的最大变化率为 pi * range / period。
+ */
+static void print_communication_report(const ethercat_master_app_t *app,
+                                       const drive_inputs_t *inputs,
+                                       const char *title) {
+    const ethercat_quality_stats_t *stats = &app->quality;
+    double elapsed_s = 0.0;
+    double avg_cycle_us = 0.0;
+    double avg_jitter_us = 0.0;
+    double complete_percent = 0.0;
+    double avg_dc_us = 0.0;
+    double peak_rate = (TWO_PI * 0.5) * (double)SINE_RANGE_COUNTS /
+                       ((double)SINE_PERIOD_NS / (double)NSEC_PER_SEC);
+
+    if (stats->start_time_ns && stats->last_cycle_time_ns >= stats->start_time_ns) {
+        elapsed_s = (double)(stats->last_cycle_time_ns - stats->start_time_ns) /
+                    (double)NSEC_PER_SEC;
+    }
+    if (stats->interval_samples) {
+        avg_cycle_us = (double)stats->cycle_time_sum_ns /
+                       (double)stats->interval_samples / 1000.0;
+        avg_jitter_us = (double)stats->jitter_abs_sum_ns /
+                        (double)stats->interval_samples / 1000.0;
+    }
+    if (stats->cycles) {
+        complete_percent = 100.0 * (double)stats->domain_complete_cycles /
+                           (double)stats->cycles;
+    }
+    if (stats->dc_valid_samples) {
+        avg_dc_us = (double)stats->dc_abs_sum_ns /
+                    (double)stats->dc_valid_samples / 1000.0;
+    }
+
+    printf("\n============================================================\n");
+    printf("              IgH 通信质量报告（%s）\n", title);
+    printf("============================================================\n");
+
+    printf("[运行概况]\n");
+    printf("  运行时长          : %12.3f s\n", elapsed_s);
+    printf("  累计周期          : %12llu\n",
+           (unsigned long long)stats->cycles);
+    printf("  标称通信周期      : %12.3f us\n",
+           (double)CYCLE_TIME_NS / 1000.0);
+
+    printf("[周期质量]\n");
+    printf("  平均实际周期      : %12.3f us\n", avg_cycle_us);
+    printf("  最小 / 最大周期   : %12.3f / %.3f us\n",
+           stats->interval_samples ? (double)stats->min_cycle_ns / 1000.0 : 0.0,
+           stats->interval_samples ? (double)stats->max_cycle_ns / 1000.0 : 0.0);
+    printf("  平均绝对抖动      : %12.3f us\n", avg_jitter_us);
+    printf("  最大绝对抖动      : %12.3f us\n",
+           (double)stats->max_abs_jitter_ns / 1000.0);
+    printf("  严重超周期次数    : %12llu  (> 150%% 标称周期)\n",
+           (unsigned long long)stats->severe_overruns);
+
+    printf("[Domain 过程数据质量]\n");
+    printf("  完整周期          : %12llu\n",
+           (unsigned long long)stats->domain_complete_cycles);
+    printf("  不完整周期        : %12llu\n",
+           (unsigned long long)stats->domain_incomplete_cycles);
+    printf("  无过程数据周期    : %12llu\n",
+           (unsigned long long)stats->domain_zero_cycles);
+    printf("  通信成功率        : %12.6f %%\n", complete_percent);
+    printf("  WC 最小 / 最大    : %12u / %u\n",
+           stats->min_working_counter == UINT_MAX ? 0 : stats->min_working_counter,
+           stats->max_working_counter);
+
+    printf("[DC 同步质量]\n");
+    printf("  有效 / 无效采样   : %12llu / %llu\n",
+           (unsigned long long)stats->dc_valid_samples,
+           (unsigned long long)stats->dc_invalid_samples);
+    printf("  平均绝对误差      : %12.3f us\n", avg_dc_us);
+    printf("  最大绝对误差      : %12.3f us\n",
+           (double)stats->max_dc_diff_ns / 1000.0);
+
+    printf("[PDO 与运动状态]\n");
+    printf("  目标位置          : %12d pulse\n", app->outputs.target_position);
+    printf("  实际位置          : %12d pulse\n", inputs->actual_position);
+    printf("  位置跟随误差      : %12d pulse\n",
+           app->outputs.target_position - inputs->actual_position);
+    printf("  状态字 / bit12    :       0x%04X / %d\n",
+           inputs->status_word, (inputs->status_word & 0x1000) ? 1 : 0);
+    printf("  模式 / 控制字     : %12d / 0x%04X\n",
+           inputs->operation_mode_display, app->outputs.control_word);
+    printf("  目标位置范围      : base ~ base + %d pulse\n", SINE_RANGE_COUNTS);
+    printf("  运动周期          : %12.3f s\n",
+           (double)SINE_PERIOD_NS / (double)NSEC_PER_SEC);
+    printf("  最大目标变化率    : %12.3f pulse/s\n", peak_rate);
+
+    printf("[主站与从站状态]\n");
+    printf("  主站链路          : %12s\n",
+           app->master_state.link_up ? "正常" : "断开");
+    printf("  响应从站数        : %12u\n", app->master_state.slaves_responding);
+    printf("  主站 AL 状态      :         0x%02X\n", app->master_state.al_states);
+    printf("  从站在线 / OP     : %12u / %u\n",
+           app->drive_state.online, app->drive_state.operational);
+    printf("  从站 AL 状态      :         0x%02X\n", app->drive_state.al_state);
+    printf("============================================================\n");
 }
 
 static const char *control_state_name(int state) {
@@ -193,6 +366,16 @@ static void update_dc_monitor(ethercat_master_app_t *app, uint64_t cycle) {
 
     if (cycle > 0 && cycle % DC_MONITOR_PERIOD_CYCLES == 0) {
         diff_ns = ecrt_master_sync_monitor_process(app->master);
+        if (diff_ns != (uint32_t)-1) {
+            app->quality.dc_valid_samples++;
+            app->quality.dc_abs_sum_ns += diff_ns;
+            if (diff_ns > app->quality.max_dc_diff_ns) {
+                app->quality.max_dc_diff_ns = diff_ns;
+            }
+        } else {
+            app->quality.dc_invalid_samples++;
+        }
+
         if (pthread_mutex_trylock(&app->debug_lock) == 0) {
             if (diff_ns != (uint32_t)-1) {
                 app->debug_snapshot.dc_sync_diff_ns = diff_ns;
@@ -307,6 +490,8 @@ static void *debug_thread_main(void *arg) {
 
 void ethercat_master_app_init(ethercat_master_app_t *app) {
     memset(app, 0, sizeof(*app));
+    app->quality.min_cycle_ns = INT64_MAX;
+    app->quality.min_working_counter = UINT_MAX;
     pthread_mutex_init(&app->debug_lock, NULL);
     app->debug_lock_ready = 1;
 }
@@ -380,6 +565,13 @@ int ethercat_master_app_configure(ethercat_master_app_t *app) {
         return -1;
     }
 
+    printf("motion profile: range=[base, base+%d], period=%.3fs, "
+           "peak_target_rate=%.3f pulse/s\n",
+           SINE_RANGE_COUNTS,
+           (double)SINE_PERIOD_NS / (double)NSEC_PER_SEC,
+           (TWO_PI * 0.5) * (double)SINE_RANGE_COUNTS /
+               ((double)SINE_PERIOD_NS / (double)NSEC_PER_SEC));
+
     return 0;
 }
 
@@ -405,6 +597,7 @@ void ethercat_master_app_stop_debug_thread(ethercat_master_app_t *app) {
 void ethercat_master_app_run(ethercat_master_app_t *app,
                              volatile sig_atomic_t *keep_running) {
     struct timespec wakeup_time;
+    drive_inputs_t last_inputs = {0};
     uint64_t cycle = 0;
 
     clock_gettime(CLOCK_MONOTONIC, &wakeup_time);
@@ -432,6 +625,11 @@ void ethercat_master_app_run(ethercat_master_app_t *app,
         ecrt_domain_process(app->domain);
 
         inputs = drive_pdo_read_inputs(app->domain_pd, &app->pdo_offsets);
+        last_inputs = inputs;
+
+        /* 周期与 domain 质量在 process 完成本周期数据后统一采样。 */
+        quality_update_cycle(app, monotonic_raw_ns());
+        quality_update_domain(app);
 
         if (cycle % PRINT_PERIOD_CYCLES == 0) {
             check_master_state(app);
@@ -456,8 +654,14 @@ void ethercat_master_app_run(ethercat_master_app_t *app,
         ecrt_master_send(app->master);
 
         cycle++;
+        if (cycle % COMMUNICATION_REPORT_PERIOD_CYCLES == 0) {
+            print_communication_report(app, &last_inputs, "每分钟累计");
+        }
         add_ns(&wakeup_time, CYCLE_TIME_NS);
     }
+
+    /* Ctrl+C 使循环退出后、释放 master 前输出最终完整报告。 */
+    print_communication_report(app, &last_inputs, "Ctrl+C 最终汇总");
 }
 
 void ethercat_master_app_release(ethercat_master_app_t *app) {
