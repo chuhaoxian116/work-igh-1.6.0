@@ -76,6 +76,9 @@ cmake --build build
 
 ## 运行
 
+IGH主站服务启动
+sudo /etc/init.d/ethercat start
+
 运行前需要确认 IgH 主站内核模块和主站服务已经启动。
 
 ```sh
