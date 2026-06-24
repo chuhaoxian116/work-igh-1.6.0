@@ -91,6 +91,14 @@
 /* DC 同步监视周期，使用 IgH sync monitor，单位 ns。 */
 #define DC_MONITOR_PERIOD_NS 1000000000ULL
 
+/*
+ * 周期调试信息开关。
+ *
+ * 默认关闭，避免每秒一行的 debug 信息干扰通信质量判断。需要临时观察
+ * PDO、控制状态或 DC 瞬时值时改为 1 即可。
+ */
+#define ENABLE_PERIODIC_DEBUG_PRINT 0
+
 /* 调试线程打印周期，单位 ns。 */
 #define DEBUG_PRINT_PERIOD_NS 1000000000ULL
 

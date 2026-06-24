@@ -85,20 +85,19 @@ static void quality_update_cycle(ethercat_master_app_t *app, int64_t now_ns) {
     }
 }
 
-/* 将 IgH domain working-counter 状态转换为可累计的通信成功率。 */
-static void quality_update_domain(ethercat_master_app_t *app) {
-    ec_domain_state_t state;
+/* 将本周期已读取的 domain 状态转换为可累计的通信成功率。 */
+static void quality_update_domain(ethercat_master_app_t *app,
+                                  const ec_domain_state_t *state) {
     ethercat_quality_stats_t *stats = &app->quality;
 
-    ecrt_domain_state(app->domain, &state);
-    if (state.working_counter < stats->min_working_counter) {
-        stats->min_working_counter = state.working_counter;
+    if (state->working_counter < stats->min_working_counter) {
+        stats->min_working_counter = state->working_counter;
     }
-    if (state.working_counter > stats->max_working_counter) {
-        stats->max_working_counter = state.working_counter;
+    if (state->working_counter > stats->max_working_counter) {
+        stats->max_working_counter = state->working_counter;
     }
 
-    switch (state.wc_state) {
+    switch (state->wc_state) {
     case EC_WC_COMPLETE:
         stats->domain_complete_cycles++;
         break;
@@ -109,6 +108,39 @@ static void quality_update_domain(ethercat_master_app_t *app) {
         stats->domain_zero_cycles++;
         break;
     }
+}
+
+/*
+ * 首次检测到从站进入 OP 后才启动质量统计。
+ *
+ * OP 前的 INIT/PRE-OP/SAFE-OP、WC=0 和启动调度抖动不代表稳定运行质量，
+ * 因此全部跳过。统计一旦启动就不再暂停；若运行中掉出 OP，后续异常周期
+ * 仍会被记录，避免掩盖真实通信故障。
+ */
+static int quality_update_after_op(ethercat_master_app_t *app, int64_t now_ns,
+                                   const ec_domain_state_t *domain_state) {
+    ethercat_quality_stats_t *stats = &app->quality;
+
+    if (!stats->active) {
+        ec_slave_config_state_t state = {0};
+
+        if (ecrt_slave_config_state(app->drive_config, &state) ||
+            !state.operational) {
+            return 0;
+        }
+
+        stats->active = 1;
+        printf("通信质量统计开始：从站已进入 OP，启动阶段数据不计入统计。\n");
+    }
+
+    quality_update_cycle(app, now_ns);
+    if (domain_state) {
+        quality_update_domain(app, domain_state);
+    } else {
+        /* 统计周期仍保留，但明确标记本周期无法取得 WC 状态。 */
+        stats->domain_state_read_errors++;
+    }
+    return 1;
 }
 
 /*
@@ -151,6 +183,14 @@ static void print_communication_report(const ethercat_master_app_t *app,
     printf("              IgH 通信质量报告（%s）\n", title);
     printf("============================================================\n");
 
+    if (!stats->active) {
+        printf("[统计状态]\n");
+        printf("  从站尚未进入 OP，本次没有有效运行期通信样本。\n");
+        printf("  INIT / PRE-OP / SAFE-OP 启动阶段数据均未计入。\n");
+        printf("============================================================\n");
+        return;
+    }
+
     printf("[运行概况]\n");
     printf("  运行时长          : %12.3f s\n", elapsed_s);
     printf("  累计周期          : %12llu\n",
@@ -176,6 +216,8 @@ static void print_communication_report(const ethercat_master_app_t *app,
            (unsigned long long)stats->domain_incomplete_cycles);
     printf("  无过程数据周期    : %12llu\n",
            (unsigned long long)stats->domain_zero_cycles);
+    printf("  Domain 读取失败   : %12llu\n",
+           (unsigned long long)stats->domain_state_read_errors);
     printf("  通信成功率        : %12.6f %%\n", complete_percent);
     printf("  WC 最小 / 最大    : %12u / %u\n",
            stats->min_working_counter == UINT_MAX ? 0 : stats->min_working_counter,
@@ -249,19 +291,17 @@ static void check_master_state(ethercat_master_app_t *app) {
     app->master_state = state;
 }
 
-/* 打印 domain working counter 和状态变化。 */
-static void check_domain_state(ethercat_master_app_t *app) {
-    ec_domain_state_t state;
-
-    ecrt_domain_state(app->domain, &state);
-    if (state.working_counter != app->domain_state.working_counter) {
-        printf("domain: WC %u\n", state.working_counter);
+/* 使用本周期状态快照，只在 domain working counter 或状态变化时打印。 */
+static void check_domain_state(ethercat_master_app_t *app,
+                               const ec_domain_state_t *state) {
+    if (state->working_counter != app->domain_state.working_counter) {
+        printf("domain: WC %u\n", state->working_counter);
     }
-    if (state.wc_state != app->domain_state.wc_state) {
-        printf("domain: state %u\n", state.wc_state);
+    if (state->wc_state != app->domain_state.wc_state) {
+        printf("domain: state %u\n", state->wc_state);
     }
 
-    app->domain_state = state;
+    app->domain_state = *state;
 }
 
 /* 打印从站 online、operational、AL state 的变化。 */
@@ -365,17 +405,22 @@ static void update_dc_monitor(ethercat_master_app_t *app, uint64_t cycle) {
 
     if (cycle > 0 && cycle % DC_MONITOR_PERIOD_CYCLES == 0) {
         diff_ns = ecrt_master_sync_monitor_process(app->master);
-        if (diff_ns != (uint32_t)-1) {
-            app->quality.dc_valid_samples++;
-            app->quality.dc_abs_sum_ns += diff_ns;
-            if (diff_ns > app->quality.max_dc_diff_ns) {
-                app->quality.max_dc_diff_ns = diff_ns;
+        /* 只统计 OP 后重新 queue 得到的结果，丢弃启动阶段残留样本。 */
+        if (app->quality.active && app->quality.dc_monitor_armed) {
+            if (diff_ns != (uint32_t)-1) {
+                app->quality.dc_valid_samples++;
+                app->quality.dc_abs_sum_ns += diff_ns;
+                if (diff_ns > app->quality.max_dc_diff_ns) {
+                    app->quality.max_dc_diff_ns = diff_ns;
+                }
+            } else {
+                app->quality.dc_invalid_samples++;
             }
-        } else {
-            app->quality.dc_invalid_samples++;
         }
 
-        if (pthread_mutex_trylock(&app->debug_lock) == 0) {
+#if ENABLE_PERIODIC_DEBUG_PRINT
+        if (app->debug_thread_running &&
+            pthread_mutex_trylock(&app->debug_lock) == 0) {
             if (diff_ns != (uint32_t)-1) {
                 app->debug_snapshot.dc_sync_diff_ns = diff_ns;
                 app->debug_snapshot.dc_sync_diff_valid = 1;
@@ -384,15 +429,18 @@ static void update_dc_monitor(ethercat_master_app_t *app, uint64_t cycle) {
             }
             pthread_mutex_unlock(&app->debug_lock);
         }
+#endif
     }
 }
 
 static void queue_dc_monitor(ethercat_master_app_t *app, uint64_t cycle) {
-    if (cycle % DC_MONITOR_PERIOD_CYCLES == 0) {
+    if (app->quality.active && cycle % DC_MONITOR_PERIOD_CYCLES == 0) {
         ecrt_master_sync_monitor_queue(app->master);
+        app->quality.dc_monitor_armed = 1;
     }
 }
 
+#if ENABLE_PERIODIC_DEBUG_PRINT
 static void update_debug_snapshot(ethercat_master_app_t *app, uint64_t cycle,
                                   const drive_inputs_t *inputs) {
     if (pthread_mutex_trylock(&app->debug_lock) != 0) {
@@ -407,6 +455,7 @@ static void update_debug_snapshot(ethercat_master_app_t *app, uint64_t cycle,
 
     pthread_mutex_unlock(&app->debug_lock);
 }
+#endif
 
 #if DEBUG_READ_SYNC_LOST_SDO
 static int read_sync_lost_count(ethercat_master_app_t *app, uint32_t *value) {
@@ -607,6 +656,8 @@ void ethercat_master_app_run(ethercat_master_app_t *app,
      */
     while (*keep_running) {
         drive_inputs_t inputs;
+        ec_domain_state_t domain_state = {0};
+        const ec_domain_state_t *domain_state_ptr = NULL;
         int ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup_time, NULL);
         if (ret) {
             if (ret == EINTR) {
@@ -625,20 +676,29 @@ void ethercat_master_app_run(ethercat_master_app_t *app,
         inputs = drive_pdo_read_inputs(app->domain_pd, &app->pdo_offsets);
         last_inputs = inputs;
 
-        /* 周期与 domain 质量在 process 完成本周期数据后统一采样。 */
-        quality_update_cycle(app, monotonic_raw_ns());
-        quality_update_domain(app);
+        /*
+         * 每周期只读取一次 Domain 状态。同一份快照既用于变化提示，也用于
+         * OP 后通信质量统计，避免重复 ioctl 和前后两次读数不一致。
+         */
+        if (ecrt_domain_state(app->domain, &domain_state) == 0) {
+            domain_state_ptr = &domain_state;
+            check_domain_state(app, domain_state_ptr);
+        }
+
+        /* 仅从首次进入 OP 的周期开始统计；启动阶段不影响成功率。 */
+        quality_update_after_op(app, monotonic_raw_ns(), domain_state_ptr);
 
         if (cycle % PRINT_PERIOD_CYCLES == 0) {
             check_master_state(app);
-            check_domain_state(app);
             check_drive_state(app);
         }
 
         update_dc_monitor(app, cycle);
         update_drive_control(app, &inputs);
         drive_pdo_write_outputs(app->domain_pd, &app->pdo_offsets, &app->outputs);
+#if ENABLE_PERIODIC_DEBUG_PRINT
         update_debug_snapshot(app, cycle, &inputs);
+#endif
 
         /*
          * 发送 process data 帧之前先排队 DC 同步报文。参考时钟会跟随上面设置
@@ -652,7 +712,8 @@ void ethercat_master_app_run(ethercat_master_app_t *app,
         ecrt_master_send(app->master);
 
         cycle++;
-        if (cycle % COMMUNICATION_REPORT_PERIOD_CYCLES == 0) {
+        if (app->quality.active && app->quality.cycles > 0 &&
+            app->quality.cycles % COMMUNICATION_REPORT_PERIOD_CYCLES == 0) {
             print_communication_report(app, &last_inputs, "每分钟累计");
         }
         add_ns(&wakeup_time, CYCLE_TIME_NS);

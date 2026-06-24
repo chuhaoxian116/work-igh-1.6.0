@@ -39,6 +39,10 @@ typedef struct {
  * 用于区分完整、部分和完全无 process data 的周期。
  */
 typedef struct {
+    /* 首次进入 OP 后置 1；启动阶段的样本不纳入通信质量统计。 */
+    int active;
+    int dc_monitor_armed;
+
     uint64_t cycles;
     uint64_t interval_samples;
     uint64_t cycle_time_sum_ns;
@@ -48,6 +52,7 @@ typedef struct {
     uint64_t domain_complete_cycles;
     uint64_t domain_incomplete_cycles;
     uint64_t domain_zero_cycles;
+    uint64_t domain_state_read_errors;
     uint32_t min_working_counter;
     uint32_t max_working_counter;
 
