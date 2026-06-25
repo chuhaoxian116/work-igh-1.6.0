@@ -1,5 +1,6 @@
 add_executable(igh_master_sinsun
     src/main.cpp
+    src/ethercat_app.cpp
 )
 
 set_target_properties(igh_master_sinsun PROPERTIES
