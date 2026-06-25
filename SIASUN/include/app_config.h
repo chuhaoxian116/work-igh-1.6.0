@@ -30,6 +30,12 @@ constexpr uint16_t kDcAssignActivate = 0x0300;
 /* 周期打印间隔，1000 个 1 ms 周期即每秒打印一次。 */
 constexpr uint64_t kPrintPeriodCycles = 1000;
 
+/* 是否打印每条 XML 参数解析结果。 */
+constexpr bool kLogAxisXmlParameterDetails = true;
+
+/* 是否打印每条 SDO 参数下发和 mailbox word 写入结果。 */
+constexpr bool kLogSdoDownloadDetails = true;
+
 /* DC 同步报文排队间隔；1 表示每个通讯周期都做一次 DC 同步。 */
 constexpr uint64_t kDcSyncPeriodCycles = 1;
 

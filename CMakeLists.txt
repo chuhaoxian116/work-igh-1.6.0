@@ -28,4 +28,4 @@ set(ETHERCAT_LIBRARY_DIR
     CACHE PATH "IgH EtherCAT library directory")
 
 add_subdirectory(GSD620)
-add_subdirectory(SINSUN)
+add_subdirectory(SIASUN)

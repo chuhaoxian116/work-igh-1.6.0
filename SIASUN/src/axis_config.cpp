@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sys/stat.h>
 
+#include "app_config.h"
 #include "tinyxml2.h"
 
 namespace sinsun {
@@ -80,6 +81,8 @@ bool parse_servo_parameter(const tinyxml2::XMLElement *element,
  * parameters：输出该轴参数列表。
  */
 int load_axis_file(const std::string &path, AxisParameters &parameters) {
+    std::printf("[XML] loading axis parameter file: %s\n", path.c_str());
+
     /* doc：tinyxml2 XML 文档对象。 */
     tinyxml2::XMLDocument doc;
 
@@ -100,16 +103,35 @@ int load_axis_file(const std::string &path, AxisParameters &parameters) {
         return -1;
     }
 
+    /* total_count：文件中遍历到的 ServoParameters 节点总数。 */
+    size_t total_count = 0;
+
+    /* skipped_count：因缺字段或 id<0 被跳过的 ServoParameters 节点数。 */
+    size_t skipped_count = 0;
+
     /* element：当前遍历到的 ServoParameters 节点。 */
     for (const tinyxml2::XMLElement *element =
              root->FirstChildElement("ServoParameters");
          element;
          element = element->NextSiblingElement("ServoParameters")) {
+        ++total_count;
+
         /* parameter：当前 ServoParameters 节点解析出来的参数。 */
         ServoParameter parameter;
 
         if (parse_servo_parameter(element, parameter)) {
             parameters.push_back(parameter);
+            if (kLogAxisXmlParameterDetails) {
+                std::printf("[XML]   valid id=%d name=%s value=%.10g qFmt=%d\n",
+                            parameter.id, parameter.name.c_str(),
+                            parameter.value, parameter.qfmt);
+            }
+        } else {
+            ++skipped_count;
+            if (kLogAxisXmlParameterDetails) {
+                std::printf("[XML]   skipped ServoParameters node #%zu\n",
+                            total_count);
+            }
         }
     }
 
@@ -117,6 +139,10 @@ int load_axis_file(const std::string &path, AxisParameters &parameters) {
         std::fprintf(stderr, "no valid ServoParameters in %s\n", path.c_str());
         return -1;
     }
+
+    std::printf("[XML] loaded %zu valid parameters from %s "
+                "(nodes=%zu skipped=%zu)\n",
+                parameters.size(), path.c_str(), total_count, skipped_count);
 
     return 0;
 }
@@ -131,24 +157,28 @@ int resolve_axis_config_directory(const std::string &requested_directory,
     if (!requested_directory.empty()) {
         candidates.push_back(requested_directory);
     } else {
-        candidates.push_back("siasun_res/gcr10_1300");
-        candidates.push_back("../siasun_res/gcr10_1300");
-        candidates.push_back("../../siasun_res/gcr10_1300");
-        candidates.push_back("/usr/local/robotlib/config");
+        candidates.push_back("SIASUN/gcr10_1300");
     }
 
     for (const auto &candidate : candidates) {
         /* axis1_path：用于确认目录有效性的 Axis1.xml 路径。 */
         const std::string axis1_path = join_path(candidate, "Axis1.xml");
 
+        std::printf("[XML] checking Axis*.xml directory: %s\n",
+                    candidate.c_str());
+
         if (is_directory(candidate)) {
             /* input：尝试打开 Axis1.xml，确认目录确实包含轴参数文件。 */
             std::ifstream input(axis1_path);
 
             if (input.good()) {
+                std::printf("[XML] selected Axis*.xml directory: %s\n",
+                            candidate.c_str());
                 selected_directory = candidate;
                 return 0;
             }
+        } else {
+            std::printf("[XML]   not a directory: %s\n", candidate.c_str());
         }
     }
 
@@ -168,10 +198,10 @@ int load_axis_parameter_set(const std::string &directory,
         if (load_axis_file(path, parameters[axis])) {
             return -1;
         }
-
-        std::printf("loaded %zu parameters from %s\n",
-                    parameters[axis].size(), path.c_str());
     }
+
+    std::printf("[XML] all Axis*.xml files loaded successfully from %s\n",
+                directory.c_str());
 
     return 0;
 }
