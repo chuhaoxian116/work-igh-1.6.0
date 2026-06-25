@@ -7,6 +7,9 @@
 #include <sched.h>
 #include <sys/mman.h>
 
+#include "axis_config.h"
+#include "sdo_parameter.h"
+
 namespace sinsun {
 namespace {
 
@@ -326,13 +329,25 @@ void setup_realtime_process() {
  * 配置并激活 SINSUN EtherCAT 主站应用。
  *
  * app：主站运行期上下文，函数会填充 master/domain/slave config/pd 指针。
+ * axis_config_directory：Axis1.xml-Axis6.xml 所在目录。
  */
-int configure(App &app) {
+int configure(App &app, const std::string &axis_config_directory) {
     /* app.master：请求到的 IgH master 句柄。 */
     app.master = ecrt_request_master(kMasterIndex);
     if (!app.master) {
         std::fprintf(stderr, "failed to request EtherCAT master %u\n",
                      kMasterIndex);
+        return -1;
+    }
+
+    /* axis_parameters：从 Axis*.xml 读取出来的 6 轴伺服参数集合。 */
+    AxisParameterSet axis_parameters;
+
+    if (load_axis_parameter_set(axis_config_directory, axis_parameters)) {
+        return -1;
+    }
+
+    if (write_axis_parameters(app.master, axis_parameters)) {
         return -1;
     }
 

@@ -4,6 +4,7 @@
 #include <array>
 #include <csignal>
 #include <cstdint>
+#include <string>
 
 #include "app_config.h"
 #include "ecrt.h"
@@ -37,8 +38,8 @@ struct App {
     ec_slave_config_state_t endio_state{};
 };
 
-/* 配置 IgH master、domain、7 个从站的 PDO/DC，并激活 master。 */
-int configure(App &app);
+/* 先写入 Axis*.xml 中的 SDO 参数，再配置 PDO/DC 并激活 master。 */
+int configure(App &app, const std::string &axis_config_directory);
 
 /* 尽力进入实时调度并锁定内存，失败时只打印 warning。 */
 void setup_realtime_process();

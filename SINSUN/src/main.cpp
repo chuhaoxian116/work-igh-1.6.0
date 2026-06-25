@@ -1,6 +1,8 @@
 #include <csignal>
 #include <cstdio>
+#include <string>
 
+#include "axis_config.h"
 #include "ethercat_app.h"
 
 namespace {
@@ -30,13 +32,30 @@ void install_signal_handlers() {
 }  // namespace
 
 /* SINSUN 主站程序入口。 */
-int main() {
+int main(int argc, char *argv[]) {
     /* app：SINSUN EtherCAT 主站运行期上下文。 */
     sinsun::App app;
 
+    /* requested_directory：命令行传入的 Axis*.xml 目录，可为空。 */
+    const std::string requested_directory = argc > 1 ? argv[1] : "";
+
+    /* axis_config_directory：最终解析得到的 Axis*.xml 目录。 */
+    std::string axis_config_directory;
+
+    if (sinsun::resolve_axis_config_directory(requested_directory,
+                                              axis_config_directory)) {
+        std::fprintf(stderr,
+                     "usage: %s [AxisXmlDirectory]\n"
+                     "example: %s /home/js/ETCAT/siasun_res/gcr10_1300\n",
+                     argv[0], argv[0]);
+        return 1;
+    }
+
+    std::printf("using Axis*.xml directory: %s\n", axis_config_directory.c_str());
+
     install_signal_handlers();
 
-    if (sinsun::configure(app)) {
+    if (sinsun::configure(app, axis_config_directory)) {
         sinsun::release(app);
         return 1;
     }

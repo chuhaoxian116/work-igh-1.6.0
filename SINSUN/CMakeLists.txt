@@ -1,6 +1,9 @@
 add_executable(igh_master_sinsun
     src/main.cpp
+    src/axis_config.cpp
     src/ethercat_app.cpp
+    src/sdo_parameter.cpp
+    ../thirdparty/tinyxml2/tinyxml2.cpp
 )
 
 set_target_properties(igh_master_sinsun PROPERTIES
@@ -9,6 +12,7 @@ set_target_properties(igh_master_sinsun PROPERTIES
 
 target_include_directories(igh_master_sinsun PRIVATE
     include
+    ../thirdparty/tinyxml2
     "${ETHERCAT_INCLUDE_DIR}"
 )
 
