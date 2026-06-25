@@ -1,8 +1,8 @@
-#include "igh_master/drive_pdo.h"
+#include "drive_pdo.h"
 
 #include <stddef.h>
 
-#include "igh_master/app_config.h"
+#include "app_config.h"
 
 /*
  * 主站写入的 RxPDO entries。

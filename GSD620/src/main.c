@@ -7,8 +7,8 @@
 #include <string.h>
 #include <sys/mman.h>
 
-#include "igh_master/app_config.h"
-#include "igh_master/ethercat_master.h"
+#include "app_config.h"
+#include "ethercat_master.h"
 
 #define MAX_SAFE_STACK (8 * 1024)
 

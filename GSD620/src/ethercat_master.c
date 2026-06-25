@@ -1,4 +1,4 @@
-#include "igh_master/ethercat_master.h"
+#include "ethercat_master.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -9,7 +9,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "igh_master/app_config.h"
+#include "app_config.h"
 
 #define NSEC_PER_SEC 1000000000LL
 #define TWO_PI 6.28318530717958647692

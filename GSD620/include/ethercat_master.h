@@ -13,7 +13,7 @@
 #include <pthread.h>
 
 #include "ecrt.h"
-#include "igh_master/drive_pdo.h"
+#include "drive_pdo.h"
 
 /*
  * 单主站、单 domain、单 CiA 402 伺服的运行状态。
