@@ -27,8 +27,14 @@ constexpr uint32_t kCycleTimeNs = 1000000;
 /* DC AssignActivate，来自两个 SINSUN ESI XML 的 DC 模式配置。 */
 constexpr uint16_t kDcAssignActivate = 0x0300;
 
-/* 周期打印间隔，1000 个 1 ms 周期即每秒打印一次。 */
-constexpr uint64_t kPrintPeriodCycles = 1000;
+/* 通信质量报告打印间隔，60000 个 1 ms 周期即每分钟打印一次。 */
+constexpr uint64_t kPrintPeriodCycles = 60000;
+
+/* DC 质量采样间隔；1000 个 1 ms 周期即每秒采样一次。 */
+constexpr uint64_t kDcQualitySamplePeriodCycles = 1000;
+
+/* 严重超周期阈值；超过 150% 标称周期计为严重超周期。 */
+constexpr uint32_t kSevereCycleOverrunNs = kCycleTimeNs * 3 / 2;
 
 /* 是否打印每条 XML 参数解析结果。 */
 constexpr bool kLogAxisXmlParameterDetails = true;

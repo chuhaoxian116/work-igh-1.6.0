@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <climits>
 #include <cstring>
 #include <ctime>
 #include <sched.h>
@@ -99,8 +100,71 @@ int configure_endio(App &app) {
         return -1;
     }
 
-    ecrt_slave_config_dc(app.endio_config, kDcAssignActivate, kCycleTimeNs, 0, 0, 0);
     return 0;
+}
+
+/* PDO 注册项上限。
+ *
+ * 当前注册：
+ * - 6 个伺服：9 个 RxPDO 输出 + 8 个 TxPDO 输入，共 102 项
+ * - 末端 IO：36 个 RxPDO 输出 + 10 个 TxPDO 输入，共 46 项
+ * 合计 148 项，256 留有余量。
+ */
+constexpr size_t kMaxPdoEntryRegs = 256;
+
+constexpr uint64_t kQualityReportPeriodCycles = 60000;
+constexpr uint64_t kDcMonitorPeriodCycles = 1000;
+constexpr uint64_t kCycleOverrunLimitNs =
+    (static_cast<uint64_t>(kCycleTimeNs) * 3ULL) / 2ULL;
+
+struct QualityStats {
+    bool active = false;
+    bool dc_monitor_armed = false;
+
+    uint64_t cycles = 0;
+    uint64_t interval_samples = 0;
+    uint64_t cycle_time_sum_ns = 0;
+    uint64_t jitter_abs_sum_ns = 0;
+    uint64_t severe_overruns = 0;
+
+    uint64_t domain_complete_cycles = 0;
+    uint64_t domain_incomplete_cycles = 0;
+    uint64_t domain_zero_cycles = 0;
+    uint64_t domain_state_read_errors = 0;
+
+    uint32_t wc_last = 0;
+    uint32_t min_working_counter = UINT_MAX;
+    uint32_t max_working_counter = 0;
+
+    uint64_t dc_valid_samples = 0;
+    uint64_t dc_invalid_samples = 0;
+    uint64_t dc_abs_sum_ns = 0;
+    uint32_t max_dc_diff_ns = 0;
+
+    int64_t start_time_ns = 0;
+    int64_t last_cycle_time_ns = 0;
+    int64_t min_cycle_ns = INT64_MAX;
+    int64_t max_cycle_ns = 0;
+    int64_t max_abs_jitter_ns = 0;
+};
+
+double ns_to_us(int64_t ns) {
+    return static_cast<double>(ns) / 1000.0;
+}
+
+int64_t abs_int64(int64_t value) {
+    return value < 0 ? -value : value;
+}
+
+/* CLOCK_MONOTONIC_RAW 不受 NTP 校时影响，用于统计真实调度周期。 */
+int64_t monotonic_raw_ns() {
+    timespec now {};
+#ifdef CLOCK_MONOTONIC_RAW
+    clock_gettime(CLOCK_MONOTONIC_RAW, &now);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &now);
+#endif
+    return timespec_to_ns(now);
 }
 
 /*
@@ -114,7 +178,7 @@ int configure_endio(App &app) {
  * subindex：PDO entry 的对象字典 subindex。
  * offset：IgH 写回过程数据字节偏移的位置。
  */
-void add_reg(std::array<ec_pdo_entry_reg_t, kServoCount * 8 + 11> &regs,
+void add_reg(std::array<ec_pdo_entry_reg_t, kMaxPdoEntryRegs> &regs,
              size_t &reg_index,
              uint16_t position,
              uint32_t product_code,
@@ -134,7 +198,7 @@ void add_reg(std::array<ec_pdo_entry_reg_t, kServoCount * 8 + 11> &regs,
  */
 int register_domain_entries(App &app) {
     /* regs：PDO entry 注册表，最后一个空元素作为 IgH 的结束标记。 */
-    std::array<ec_pdo_entry_reg_t, kServoCount * 8 + 11> regs {};
+    std::array<ec_pdo_entry_reg_t, kMaxPdoEntryRegs> regs {};
 
     /* reg_index：regs 当前写入下标。 */
     size_t reg_index = 0;
@@ -144,27 +208,68 @@ int register_domain_entries(App &app) {
         /* pos：IgH 从站位置，和当前伺服数组下标一致。 */
         const uint16_t pos = static_cast<uint16_t>(i);
 
-        /* o：当前伺服的 PDO offset 集合，注册成功后由 IgH 填充。 */
-        ServoOffsets &o = app.servo_offsets[i];
+        /* out：当前伺服 RxPDO 输出 offset。 */
+        ServoOutputOffsets &out = app.servo_output_offsets[i];
+
+        add_reg(regs, reg_index, pos, kServoProductCode, 0x607A, 0x00,
+                &out.target_position);
+        add_reg(regs, reg_index, pos, kServoProductCode, 0x60FE, 0x00,
+                &out.digital_outputs);
+        add_reg(regs, reg_index, pos, kServoProductCode, 0x60FF, 0x00,
+                &out.target_velocity);
+        add_reg(regs, reg_index, pos, kServoProductCode, 0x6040, 0x00,
+                &out.control_word);
+        add_reg(regs, reg_index, pos, kServoProductCode, 0x6071, 0x00,
+                &out.target_torque);
+        add_reg(regs, reg_index, pos, kServoProductCode, 0x6060, 0x00,
+                &out.operation_mode);
+        add_reg(regs, reg_index, pos, kServoProductCode, 0x7006, 0x00,
+                &out.safe_control);
+        add_reg(regs, reg_index, pos, kServoProductCode, 0x7007, 0x00,
+                &out.target_safe_position);
+        add_reg(regs, reg_index, pos, kServoProductCode, 0x7008, 0x00,
+                &out.user_output);
+
+        /* in：当前伺服 TxPDO 输入 offset。 */
+        ServoOffsets &in = app.servo_offsets[i];
 
         add_reg(regs, reg_index, pos, kServoProductCode, 0x6064, 0x00,
-                &o.actual_position);
+                &in.actual_position);
         add_reg(regs, reg_index, pos, kServoProductCode, 0x60FD, 0x00,
-                &o.digital_input);
+                &in.digital_input);
         add_reg(regs, reg_index, pos, kServoProductCode, 0x603F, 0x00,
-                &o.error_code);
+                &in.error_code);
         add_reg(regs, reg_index, pos, kServoProductCode, 0x606C, 0x00,
-                &o.actual_velocity);
+                &in.actual_velocity);
         add_reg(regs, reg_index, pos, kServoProductCode, 0x6041, 0x00,
-                &o.status_word);
+                &in.status_word);
         add_reg(regs, reg_index, pos, kServoProductCode, 0x6077, 0x00,
-                &o.actual_torque);
+                &in.actual_torque);
         add_reg(regs, reg_index, pos, kServoProductCode, 0x6061, 0x00,
-                &o.operation_mode_display);
+                &in.operation_mode_display);
         add_reg(regs, reg_index, pos, kServoProductCode, 0x600B, 0x00,
-                &o.sync0_time_difference);
+                &in.sync0_time_difference);
     }
 
+    /* 末端 IO RxPDO 输出 offset。 */
+    EndIoOutputOffsets &endio_out = app.endio_output_offsets;
+
+    add_reg(regs, reg_index, kEndIoPosition, kEndIoProductCode, 0x7000, 0x01,
+            &endio_out.led_work_control);
+    add_reg(regs, reg_index, kEndIoPosition, kEndIoProductCode, 0x7000, 0x02,
+            &endio_out.digital_outputs_control);
+    add_reg(regs, reg_index, kEndIoPosition, kEndIoProductCode, 0x7000, 0x03,
+            &endio_out.rs485_outputs_count);
+    add_reg(regs, reg_index, kEndIoPosition, kEndIoProductCode, 0x7000, 0x04,
+            &endio_out.rs485_outputs_len);
+
+    for (uint8_t subindex = 0x05; subindex <= 0x24; ++subindex) {
+        const size_t data_index = static_cast<size_t>(subindex - 0x05);
+        add_reg(regs, reg_index, kEndIoPosition, kEndIoProductCode, 0x7000,
+                subindex, &endio_out.rs485_outputs_data[data_index]);
+    }
+
+    /* 末端 IO TxPDO 输入 offset。 */
     add_reg(regs, reg_index, kEndIoPosition, kEndIoProductCode, 0x6000, 0x01,
             &app.endio_offsets.error_code);
     add_reg(regs, reg_index, kEndIoPosition, kEndIoProductCode, 0x6000, 0x02,
@@ -186,7 +291,17 @@ int register_domain_entries(App &app) {
     add_reg(regs, reg_index, kEndIoPosition, kEndIoProductCode, 0x6000, 0x0A,
             &app.endio_offsets.rs485_inputs_len);
 
+    if (reg_index + 1 >= regs.size()) {
+        std::fprintf(stderr, "too many PDO entries registered: %zu/%zu\n",
+                     reg_index, regs.size());
+        return -1;
+    }
+
     regs[reg_index] = ec_pdo_entry_reg_t{};
+
+    std::printf("[PDO] registered %zu PDO entries "
+                "(including RxPDO outputs and TxPDO inputs)\n",
+                reg_index);
 
     if (ecrt_domain_reg_pdo_entry_list(app.domain, regs.data())) {
         std::fprintf(stderr, "failed to register PDO entries\n");
@@ -205,7 +320,9 @@ void print_state_changes(App &app) {
     /* master_state：本周期读取到的 master 状态。 */
     ec_master_state_t master_state {};
     if (ecrt_master_state(app.master, &master_state) == 0 &&
-        std::memcmp(&master_state, &app.master_state, sizeof(master_state)) != 0) {
+        (master_state.slaves_responding != app.master_state.slaves_responding ||
+         master_state.al_states != app.master_state.al_states ||
+         master_state.link_up != app.master_state.link_up)) {
         std::printf("master: slaves=%u al_states=0x%02X link=%s\n",
                     master_state.slaves_responding,
                     master_state.al_states,
@@ -216,7 +333,8 @@ void print_state_changes(App &app) {
     /* domain_state：本周期读取到的 domain working-counter 状态。 */
     ec_domain_state_t domain_state {};
     if (ecrt_domain_state(app.domain, &domain_state) == 0 &&
-        std::memcmp(&domain_state, &app.domain_state, sizeof(domain_state)) != 0) {
+        (domain_state.working_counter != app.domain_state.working_counter ||
+         domain_state.wc_state != app.domain_state.wc_state)) {
         std::printf("domain: wc=%u state=%u\n",
                     domain_state.working_counter,
                     domain_state.wc_state);
@@ -228,7 +346,9 @@ void print_state_changes(App &app) {
         /* state：本周期读取到的单个伺服应用层状态。 */
         ec_slave_config_state_t state {};
         if (ecrt_slave_config_state(app.servo_configs[i], &state) == 0 &&
-            std::memcmp(&state, &app.servo_states[i], sizeof(state)) != 0) {
+            (state.al_state != app.servo_states[i].al_state ||
+             state.online != app.servo_states[i].online ||
+             state.operational != app.servo_states[i].operational)) {
             std::printf("servo %zu: al_state=0x%02X online=%u operational=%u\n",
                         i + 1,
                         state.al_state,
@@ -241,7 +361,9 @@ void print_state_changes(App &app) {
     /* endio_state：本周期读取到的末端 IO 应用层状态。 */
     ec_slave_config_state_t endio_state {};
     if (ecrt_slave_config_state(app.endio_config, &endio_state) == 0 &&
-        std::memcmp(&endio_state, &app.endio_state, sizeof(endio_state)) != 0) {
+        (endio_state.al_state != app.endio_state.al_state ||
+         endio_state.online != app.endio_state.online ||
+         endio_state.operational != app.endio_state.operational)) {
         std::printf("endio %u: al_state=0x%02X online=%u operational=%u\n",
                     kEndIoLogicalId,
                     endio_state.al_state,
@@ -302,6 +424,340 @@ void print_process_data(const App &app, uint64_t cycle) {
         EC_READ_S16(pd + e.acceleration_3),
         EC_READ_U16(pd + e.rs485_inputs_count),
         EC_READ_U16(pd + e.rs485_inputs_len));
+}
+
+/*
+ * 周期性写入默认输出 PDO。
+ *
+ * 当前程序不做使能和运动，所有 RxPDO 输出保持 0；但输出区必须被写入并 queue，
+ * 否则从站 SM2 输出区没有有效过程数据。
+ */
+void write_default_outputs(App &app) {
+    uint8_t *pd = app.domain_pd;
+
+    for (size_t i = 0; i < kServoCount; ++i) {
+        const ServoOutputOffsets &o = app.servo_output_offsets[i];
+
+        EC_WRITE_S32(pd + o.target_position, 0);
+        EC_WRITE_U32(pd + o.digital_outputs, 0);
+        EC_WRITE_S32(pd + o.target_velocity, 0);
+        EC_WRITE_U16(pd + o.control_word, 0x0000);
+        EC_WRITE_S16(pd + o.target_torque, 0);
+        EC_WRITE_U8(pd + o.operation_mode, 0);
+        EC_WRITE_U8(pd + o.safe_control, 0);
+        EC_WRITE_S32(pd + o.target_safe_position, 0);
+        EC_WRITE_U32(pd + o.user_output, 0);
+    }
+
+    const EndIoOutputOffsets &e = app.endio_output_offsets;
+
+    EC_WRITE_U8(pd + e.led_work_control, 0);
+    EC_WRITE_U8(pd + e.digital_outputs_control, 0);
+    EC_WRITE_U16(pd + e.rs485_outputs_count, 0);
+    EC_WRITE_U16(pd + e.rs485_outputs_len, 0);
+
+    for (const auto offset : e.rs485_outputs_data) {
+        EC_WRITE_U8(pd + offset, 0);
+    }
+}
+
+/*
+ * 每秒打印一次主站和 domain 快照，便于确认 domain size / WKC 是否正常。
+ */
+void print_periodic_status(App &app, uint64_t cycle) {
+    ec_master_state_t master_state {};
+    ec_domain_state_t domain_state {};
+
+    ecrt_master_state(app.master, &master_state);
+    ecrt_domain_state(app.domain, &domain_state);
+
+    std::printf("\ncycle=%llu master slaves=%u al_states=0x%02X link=%s "
+                "domain wc=%u wc_state=%u\n",
+                static_cast<unsigned long long>(cycle),
+                master_state.slaves_responding,
+                master_state.al_states,
+                master_state.link_up ? "up" : "down",
+                domain_state.working_counter,
+                domain_state.wc_state);
+}
+
+
+bool all_slaves_operational(App &app) {
+    for (size_t i = 0; i < kServoCount; ++i) {
+        ec_slave_config_state_t state {};
+        if (ecrt_slave_config_state(app.servo_configs[i], &state) != 0) {
+            return false;
+        }
+        if (!state.online || !state.operational || state.al_state != 0x08) {
+            return false;
+        }
+    }
+
+    ec_slave_config_state_t endio_state {};
+    if (ecrt_slave_config_state(app.endio_config, &endio_state) != 0) {
+        return false;
+    }
+
+    return endio_state.online && endio_state.operational &&
+           endio_state.al_state == 0x08;
+}
+
+void quality_update_cycle(QualityStats &stats, int64_t now_ns) {
+    ++stats.cycles;
+
+    if (stats.start_time_ns == 0) {
+        stats.start_time_ns = now_ns;
+        stats.last_cycle_time_ns = now_ns;
+        return;
+    }
+
+    const int64_t interval_ns = now_ns - stats.last_cycle_time_ns;
+    const int64_t jitter_ns = abs_int64(interval_ns -
+                                        static_cast<int64_t>(kCycleTimeNs));
+
+    stats.last_cycle_time_ns = now_ns;
+    ++stats.interval_samples;
+    stats.cycle_time_sum_ns += static_cast<uint64_t>(interval_ns);
+    stats.jitter_abs_sum_ns += static_cast<uint64_t>(jitter_ns);
+
+    if (interval_ns < stats.min_cycle_ns) {
+        stats.min_cycle_ns = interval_ns;
+    }
+    if (interval_ns > stats.max_cycle_ns) {
+        stats.max_cycle_ns = interval_ns;
+    }
+    if (jitter_ns > stats.max_abs_jitter_ns) {
+        stats.max_abs_jitter_ns = jitter_ns;
+    }
+    if (static_cast<uint64_t>(interval_ns) > kCycleOverrunLimitNs) {
+        ++stats.severe_overruns;
+    }
+}
+
+void quality_update_domain(QualityStats &stats,
+                           const ec_domain_state_t *domain_state) {
+    if (!domain_state) {
+        ++stats.domain_state_read_errors;
+        return;
+    }
+
+    stats.wc_last = domain_state->working_counter;
+    if (domain_state->working_counter < stats.min_working_counter) {
+        stats.min_working_counter = domain_state->working_counter;
+    }
+    if (domain_state->working_counter > stats.max_working_counter) {
+        stats.max_working_counter = domain_state->working_counter;
+    }
+
+    switch (domain_state->wc_state) {
+    case EC_WC_COMPLETE:
+        ++stats.domain_complete_cycles;
+        break;
+    case EC_WC_INCOMPLETE:
+        ++stats.domain_incomplete_cycles;
+        break;
+    default:
+        ++stats.domain_zero_cycles;
+        break;
+    }
+}
+
+bool quality_update_after_op(App &app,
+                             QualityStats &stats,
+                             int64_t now_ns,
+                             const ec_domain_state_t *domain_state) {
+    if (!stats.active) {
+        if (!all_slaves_operational(app)) {
+            return false;
+        }
+
+        stats.active = true;
+        std::printf("通信质量统计开始：7 个从站已全部进入 OP，启动阶段数据不计入统计。\n");
+    }
+
+    quality_update_cycle(stats, now_ns);
+    quality_update_domain(stats, domain_state);
+    return true;
+}
+
+void update_dc_monitor(App &app, QualityStats &stats, uint64_t cycle) {
+    if (cycle > 0 && cycle % kDcMonitorPeriodCycles == 0) {
+        const uint32_t diff_ns = ecrt_master_sync_monitor_process(app.master);
+
+        if (stats.active && stats.dc_monitor_armed) {
+            if (diff_ns != static_cast<uint32_t>(-1)) {
+                ++stats.dc_valid_samples;
+                stats.dc_abs_sum_ns += diff_ns;
+                if (diff_ns > stats.max_dc_diff_ns) {
+                    stats.max_dc_diff_ns = diff_ns;
+                }
+            } else {
+                ++stats.dc_invalid_samples;
+            }
+        }
+    }
+}
+
+void queue_dc_monitor(App &app, QualityStats &stats, uint64_t cycle) {
+    if (stats.active && cycle % kDcMonitorPeriodCycles == 0) {
+        ecrt_master_sync_monitor_queue(app.master);
+        stats.dc_monitor_armed = true;
+    }
+}
+
+void print_quality_report(App &app,
+                          const QualityStats &stats,
+                          bool final_report) {
+    ec_master_state_t master_state {};
+    ec_domain_state_t domain_state {};
+    std::array<ec_slave_config_state_t, kServoCount> servo_states {};
+    ec_slave_config_state_t endio_state {};
+    size_t online_count = 0;
+    size_t op_count = 0;
+
+    ecrt_master_state(app.master, &master_state);
+    ecrt_domain_state(app.domain, &domain_state);
+
+    for (size_t i = 0; i < kServoCount; ++i) {
+        ecrt_slave_config_state(app.servo_configs[i], &servo_states[i]);
+        if (servo_states[i].online) {
+            ++online_count;
+        }
+        if (servo_states[i].operational) {
+            ++op_count;
+        }
+    }
+
+    ecrt_slave_config_state(app.endio_config, &endio_state);
+    if (endio_state.online) {
+        ++online_count;
+    }
+    if (endio_state.operational) {
+        ++op_count;
+    }
+
+    double runtime_s = 0.0;
+    if (stats.start_time_ns != 0 && stats.last_cycle_time_ns >= stats.start_time_ns) {
+        runtime_s = static_cast<double>(stats.last_cycle_time_ns - stats.start_time_ns) /
+                    1000000000.0;
+    }
+
+    const double nominal_period_us = ns_to_us(kCycleTimeNs);
+    const double avg_period_us = stats.interval_samples > 0 ?
+        ns_to_us(static_cast<int64_t>(stats.cycle_time_sum_ns /
+                                      stats.interval_samples)) : 0.0;
+    const double avg_jitter_us = stats.interval_samples > 0 ?
+        ns_to_us(static_cast<int64_t>(stats.jitter_abs_sum_ns /
+                                      stats.interval_samples)) : 0.0;
+    const double success_rate = stats.cycles > 0 ?
+        static_cast<double>(stats.domain_complete_cycles) * 100.0 /
+            static_cast<double>(stats.cycles) : 0.0;
+    const double dc_avg_abs_us = stats.dc_valid_samples > 0 ?
+        ns_to_us(static_cast<int64_t>(stats.dc_abs_sum_ns /
+                                      stats.dc_valid_samples)) : 0.0;
+    const uint32_t wc_min = stats.min_working_counter == UINT_MAX ?
+        0 : stats.min_working_counter;
+
+    std::printf("============================================================\n");
+    std::printf("              IgH 通信质量报告（%s）\n",
+                final_report ? "Ctrl+C 最终汇总" : "一分钟周期快照");
+    std::printf("============================================================\n");
+
+    if (!stats.active) {
+        std::printf("[统计状态]\n");
+        std::printf("  7 个从站尚未全部进入 OP，本次没有有效运行期通信样本。\n");
+        std::printf("  INIT / PREOP / SAFEOP 启动阶段数据均未计入。\n");
+        std::printf("============================================================\n");
+        return;
+    }
+
+    std::printf("[运行概况]\n");
+    std::printf("  运行时长          : %12.3f s\n", runtime_s);
+    std::printf("  累计周期          : %12llu\n",
+                static_cast<unsigned long long>(stats.cycles));
+    std::printf("  标称通信周期      : %12.3f us\n", nominal_period_us);
+
+    std::printf("[周期质量]\n");
+    std::printf("  平均实际周期      : %12.3f us\n", avg_period_us);
+    std::printf("  最小 / 最大周期   : %12.3f / %.3f us\n",
+                stats.interval_samples > 0 ? ns_to_us(stats.min_cycle_ns) : 0.0,
+                stats.interval_samples > 0 ? ns_to_us(stats.max_cycle_ns) : 0.0);
+    std::printf("  平均绝对抖动      : %12.3f us\n", avg_jitter_us);
+    std::printf("  最大绝对抖动      : %12.3f us\n",
+                ns_to_us(stats.max_abs_jitter_ns));
+    std::printf("  严重超周期次数    : %12llu  (> 150%% 标称周期)\n",
+                static_cast<unsigned long long>(stats.severe_overruns));
+
+    std::printf("[Domain 过程数据质量]\n");
+    std::printf("  完整周期          : %12llu\n",
+                static_cast<unsigned long long>(stats.domain_complete_cycles));
+    std::printf("  不完整周期        : %12llu\n",
+                static_cast<unsigned long long>(stats.domain_incomplete_cycles));
+    std::printf("  无过程数据周期    : %12llu\n",
+                static_cast<unsigned long long>(stats.domain_zero_cycles));
+    std::printf("  Domain 状态失败   : %12llu\n",
+                static_cast<unsigned long long>(stats.domain_state_read_errors));
+    std::printf("  通信成功率        : %12.6f %%\n", success_rate);
+    std::printf("  WC 当前 / 最小 / 最大 : %8u / %8u / %8u\n",
+                stats.wc_last, wc_min, stats.max_working_counter);
+    std::printf("  Domain 当前状态   : wc=%u state=%u\n",
+                domain_state.working_counter, domain_state.wc_state);
+
+    std::printf("[DC 同步质量]\n");
+    std::printf("  统计来源          : IgH sync monitor\n");
+    std::printf("  DC 配置           : 6 个伺服参与 DC，EndIO 不配置 DC\n");
+    std::printf("  DC 参考从站       : Servo 1 / position 0\n");
+    std::printf("  有效 / 无效采样   : %12llu / %llu\n",
+                static_cast<unsigned long long>(stats.dc_valid_samples),
+                static_cast<unsigned long long>(stats.dc_invalid_samples));
+    std::printf("  平均绝对误差      : %12.3f us\n", dc_avg_abs_us);
+    std::printf("  最大绝对误差      : %12.3f us\n",
+                ns_to_us(stats.max_dc_diff_ns));
+
+    std::printf("[主站与从站状态]\n");
+    std::printf("  主站链路          : %12s\n", master_state.link_up ? "正常" : "异常");
+    std::printf("  响应从站数        : %12u\n", master_state.slaves_responding);
+    std::printf("  主站 AL 状态      :         0x%02X\n", master_state.al_states);
+    std::printf("  从站在线 / OP     : %12zu / %zu\n", online_count, op_count);
+
+    std::printf("[伺服状态快照]\n");
+    const uint8_t *pd = app.domain_pd;
+    for (size_t i = 0; i < kServoCount; ++i) {
+        const ServoOffsets &o = app.servo_offsets[i];
+        std::printf("  Servo %zu: AL=0x%02X online=%u OP=%u status=0x%04X "
+                    "mode=%d pos=%d vel=%d torque=%d err=0x%08X sync0_pdo=%u\n",
+                    i + 1,
+                    servo_states[i].al_state,
+                    servo_states[i].online,
+                    servo_states[i].operational,
+                    EC_READ_U16(pd + o.status_word),
+                    EC_READ_S8(pd + o.operation_mode_display),
+                    EC_READ_S32(pd + o.actual_position),
+                    EC_READ_S32(pd + o.actual_velocity),
+                    EC_READ_S16(pd + o.actual_torque),
+                    EC_READ_U32(pd + o.error_code),
+                    EC_READ_U16(pd + o.sync0_time_difference));
+    }
+
+    const EndIoOffsets &e = app.endio_offsets;
+    std::printf("[EndIO 状态快照]\n");
+    std::printf("  EndIO %u: AL=0x%02X online=%u OP=%u err=0x%02X din=0x%02X "
+                "ai1=%u ai2=%u temp=%d acc=(%d,%d,%d) rs485_count=%u rs485_len=%u\n",
+                kEndIoLogicalId,
+                endio_state.al_state,
+                endio_state.online,
+                endio_state.operational,
+                EC_READ_U8(pd + e.error_code),
+                EC_READ_U8(pd + e.digital_inputs),
+                EC_READ_U16(pd + e.analog_voltage_1),
+                EC_READ_U16(pd + e.analog_voltage_2),
+                EC_READ_S16(pd + e.temperature),
+                EC_READ_S16(pd + e.acceleration_1),
+                EC_READ_S16(pd + e.acceleration_2),
+                EC_READ_S16(pd + e.acceleration_3),
+                EC_READ_U16(pd + e.rs485_inputs_count),
+                EC_READ_U16(pd + e.rs485_inputs_len));
+    std::printf("============================================================\n");
 }
 
 }  // namespace
@@ -369,6 +825,11 @@ int configure(App &app, const std::string &axis_config_directory) {
         return -1;
     }
 
+    if (ecrt_master_select_reference_clock(app.master, app.servo_configs[0])) {
+        std::fprintf(stderr, "failed to select Servo 1 as DC reference clock\n");
+        return -1;
+    }
+
     if (ecrt_master_activate(app.master)) {
         std::fprintf(stderr, "failed to activate EtherCAT master\n");
         return -1;
@@ -379,6 +840,9 @@ int configure(App &app, const std::string &axis_config_directory) {
         std::fprintf(stderr, "failed to get domain process data\n");
         return -1;
     }
+
+    /* 激活后先初始化一次输出 PDO 默认值。 */
+    write_default_outputs(app);
 
     return 0;
 }
@@ -394,6 +858,8 @@ void run(App &app, volatile std::sig_atomic_t &keep_running) {
     timespec wakeup {};
 
     clock_gettime(CLOCK_MONOTONIC, &wakeup);
+
+    QualityStats quality_stats {};
 
     std::printf("starting 1 ms SINSUN EtherCAT communication loop\n");
     std::printf("topology: servo id 1-6, endio id 7, DC assign=0x%04X\n",
@@ -413,10 +879,25 @@ void run(App &app, volatile std::sig_atomic_t &keep_running) {
         ecrt_master_receive(app.master);
         ecrt_domain_process(app.domain);
 
+        ec_domain_state_t domain_state {};
+        const ec_domain_state_t *domain_state_ptr = nullptr;
+        if (ecrt_domain_state(app.domain, &domain_state) == 0) {
+            domain_state_ptr = &domain_state;
+        }
+
         print_state_changes(app);
 
-        if (cycle % kPrintPeriodCycles == 0) {
-            print_process_data(app, cycle);
+        quality_update_after_op(app, quality_stats, monotonic_raw_ns(),
+                                domain_state_ptr);
+
+        update_dc_monitor(app, quality_stats, cycle);
+
+        /* 即使不做使能/运动，也要每周期刷新输出 PDO 默认值。 */
+        write_default_outputs(app);
+
+        if (cycle > 0 && quality_stats.active && quality_stats.cycles > 0 &&
+            quality_stats.cycles % kQualityReportPeriodCycles == 0) {
+            print_quality_report(app, quality_stats, false);
         }
 
         if (cycle % kDcSyncPeriodCycles == 0) {
@@ -424,10 +905,14 @@ void run(App &app, volatile std::sig_atomic_t &keep_running) {
             ecrt_master_sync_slave_clocks(app.master);
         }
 
+        queue_dc_monitor(app, quality_stats, cycle);
+
         ecrt_domain_queue(app.domain);
         ecrt_master_send(app.master);
         ++cycle;
     }
+
+    print_quality_report(app, quality_stats, true);
 }
 
 /*

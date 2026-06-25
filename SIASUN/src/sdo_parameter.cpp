@@ -149,7 +149,7 @@ int write_axis_parameters(ec_master_t *master,
         const uint16_t slave_position = static_cast<uint16_t>(axis);
 
         std::printf("[SDO] servo %zu writing %zu XML parameters\n",
-                    parameters[axis].size(), axis + 1);
+                    axis + 1, parameters[axis].size());
 
         /* written_count：当前轴已成功下发的 XML 参数数量。 */
         size_t written_count = 0;

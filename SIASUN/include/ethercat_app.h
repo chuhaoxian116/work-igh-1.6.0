@@ -24,9 +24,13 @@ struct App {
     ec_slave_config_t *endio_config = nullptr;
     /* 激活 master 后取得的 domain process data 起始地址。 */
     uint8_t *domain_pd = nullptr;
-    /* 6 个伺服需要读取和打印的 PDO entry 偏移。 */
+    /* 6 个伺服 RxPDO 输出 entry 偏移；即使不运动，也要周期性写默认输出。 */
+    std::array<ServoOutputOffsets, kServoCount> servo_output_offsets{};
+    /* 末端 IO RxPDO 输出 entry 偏移。 */
+    EndIoOutputOffsets endio_output_offsets{};
+    /* 6 个伺服 TxPDO 输入 entry 偏移，用于读取和打印。 */
     std::array<ServoOffsets, kServoCount> servo_offsets{};
-    /* 末端 IO 需要读取和打印的 PDO entry 偏移。 */
+    /* 末端 IO TxPDO 输入 entry 偏移，用于读取和打印。 */
     EndIoOffsets endio_offsets{};
     /* 上一次打印过的 master 状态，用于只在状态变化时打印。 */
     ec_master_state_t master_state{};

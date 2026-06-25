@@ -112,6 +112,32 @@ inline const ec_sync_info_t endio_syncs[] = {
     {0xff, EC_DIR_INVALID, 0, nullptr, EC_WD_DEFAULT},
 };
 
+/* 伺服 RxPDO 输出 entry 在 process data 区里的字节偏移。
+ *
+ * 这些 offset 必须注册进 domain。即使当前不做使能/运动，也要周期性写默认
+ * 输出值，否则 domain 只会包含 TxPDO 输入区，IgH 只发 LRD，SM2 输出区不会被刷新。
+ */
+struct ServoOutputOffsets {
+    /* 0x607A:00，目标位置。 */
+    unsigned int target_position = 0;
+    /* 0x60FE:00，数字输出。 */
+    unsigned int digital_outputs = 0;
+    /* 0x60FF:00，目标速度。 */
+    unsigned int target_velocity = 0;
+    /* 0x6040:00，控制字。 */
+    unsigned int control_word = 0;
+    /* 0x6071:00，目标转矩。 */
+    unsigned int target_torque = 0;
+    /* 0x6060:00，目标运行模式。 */
+    unsigned int operation_mode = 0;
+    /* 0x7006:00，安全控制字节。 */
+    unsigned int safe_control = 0;
+    /* 0x7007:00，安全目标位置。 */
+    unsigned int target_safe_position = 0;
+    /* 0x7008:00，用户输出。 */
+    unsigned int user_output = 0;
+};
+
 /* 伺服中需要打印的 TxPDO entry 在 process data 区里的字节偏移。 */
 struct ServoOffsets {
     /* 0x6064:00，伺服实际位置。 */
@@ -130,6 +156,24 @@ struct ServoOffsets {
     unsigned int operation_mode_display = 0;
     /* 0x600B:00，伺服反馈的 Sync0 时间差。 */
     unsigned int sync0_time_difference = 0;
+};
+
+/* 末端 IO RxPDO 输出 entry 在 process data 区里的字节偏移。
+ *
+ * 0x7000:01~0x7000:24 必须注册进 domain，使 SM2 输出区参与周期通讯。
+ * 当前程序不做业务输出，周期性写 0。
+ */
+struct EndIoOutputOffsets {
+    /* 0x7000:01，LED 工作控制。 */
+    unsigned int led_work_control = 0;
+    /* 0x7000:02，数字输出控制。 */
+    unsigned int digital_outputs_control = 0;
+    /* 0x7000:03，RS485 输出计数。 */
+    unsigned int rs485_outputs_count = 0;
+    /* 0x7000:04，RS485 输出长度。 */
+    unsigned int rs485_outputs_len = 0;
+    /* 0x7000:05~0x7000:24，RS485 输出数据 1~32。 */
+    std::array<unsigned int, 32> rs485_outputs_data {};
 };
 
 /* 末端 IO 中需要打印的 TxPDO entry 在 process data 区里的字节偏移。 */
