@@ -51,6 +51,23 @@ constexpr int kMaxSafeStack = 8 * 1024;
 /* 伺服从站数量；拓扑 id 1-6 都是伺服。 */
 constexpr size_t kServoCount = 6;
 
+/* 只使能和运动最后一个伺服关节；数组下标 5 对应用户侧 Servo 6。 */
+constexpr size_t kMotionServoIndex = kServoCount - 1;
+
+/* 最后一个伺服使用 CSP：Cyclic Synchronous Position。 */
+constexpr int8_t kDriveOperationMode = 8;
+
+/* 使能序列中每个控制字保持 1000 个 1 ms 周期，即 1 秒。 */
+constexpr uint64_t kEnableStepCycles = 1000;
+
+/* 最后一个关节的正弦运动参数：以 base 为中心，幅值单位 pulse。 */
+constexpr int32_t kMotionAmplitudeCounts = 100000;
+constexpr int32_t kMotionRangeCounts = kMotionAmplitudeCounts * 2;
+constexpr uint64_t kMotionPeriodCycles = 20000;
+
+/* 正弦启动渐变时间；前 2 秒振幅从 0 平滑增加到设定值。 */
+constexpr uint64_t kMotionRampCycles = 2000;
+
 /* 末端 IO 的用户侧逻辑 id；用户描述中它是第 7 个从站。 */
 constexpr uint16_t kEndIoLogicalId = 7;
 

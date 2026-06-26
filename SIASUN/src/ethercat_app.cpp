@@ -1,6 +1,7 @@
 #include "ethercat_app.h"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <climits>
 #include <cstring>
@@ -112,10 +113,27 @@ int configure_endio(App &app) {
  */
 constexpr size_t kMaxPdoEntryRegs = 256;
 
-constexpr uint64_t kQualityReportPeriodCycles = 60000;
+constexpr uint64_t kQualityReportPeriodCycles = 10000;
 constexpr uint64_t kDcMonitorPeriodCycles = 1000;
 constexpr uint64_t kCycleOverrunLimitNs =
     (static_cast<uint64_t>(kCycleTimeNs) * 3ULL) / 2ULL;
+constexpr double kPi = 3.14159265358979323846;
+
+enum class ServoControlState {
+    WaitStatus,
+    Enable06,
+    Enable07,
+    Enable0F,
+    SineMotion,
+};
+
+struct ServoMotionControl {
+    ServoControlState state = ServoControlState::WaitStatus;
+    bool waiting_op_logged = false;
+    uint64_t state_cycles = 0;
+    uint64_t motion_cycles = 0;
+    int32_t base_position = 0;
+};
 
 struct QualityStats {
     bool active = false;
@@ -373,84 +391,19 @@ void print_state_changes(App &app) {
     }
 }
 
-/*
- * 打印当前过程数据快照。
- *
- * app：主站运行期上下文，提供 process data 地址和 PDO offset。
- * cycle：当前 1 ms 通讯周期计数。
- */
-void print_process_data(const App &app, uint64_t cycle) {
-    std::printf("\ncycle=%llu\n", static_cast<unsigned long long>(cycle));
-
-    /* i：伺服数组下标，0-5 对应用户侧 id 1-6。 */
-    for (size_t i = 0; i < kServoCount; ++i) {
-        /* o：当前伺服的 PDO offset 集合。 */
-        const ServoOffsets &o = app.servo_offsets[i];
-
-        /* pd：domain process data 起始地址，用 offset 定位每个 PDO entry。 */
-        const uint8_t *pd = app.domain_pd;
-
-        std::printf(
-            "servo %zu: pos=%d vel=%d torque=%d status=0x%04X mode=%d "
-            "err=0x%08X din=0x%08X sync0_diff=%u\n",
-            i + 1,
-            EC_READ_S32(pd + o.actual_position),
-            EC_READ_S32(pd + o.actual_velocity),
-            EC_READ_S16(pd + o.actual_torque),
-            EC_READ_U16(pd + o.status_word),
-            EC_READ_S8(pd + o.operation_mode_display),
-            EC_READ_U32(pd + o.error_code),
-            EC_READ_U32(pd + o.digital_input),
-            EC_READ_U16(pd + o.sync0_time_difference));
-    }
-
-    /* e：末端 IO 的 PDO offset 集合。 */
-    const EndIoOffsets &e = app.endio_offsets;
-
-    /* pd：domain process data 起始地址，用 offset 定位末端 IO PDO entry。 */
-    const uint8_t *pd = app.domain_pd;
-
-    std::printf(
-        "endio %u: err=0x%02X din=0x%02X ai1=%u ai2=%u temp=%d "
-        "acc=(%d,%d,%d) rs485_count=%u rs485_len=%u\n",
-        kEndIoLogicalId,
-        EC_READ_U8(pd + e.error_code),
-        EC_READ_U8(pd + e.digital_inputs),
-        EC_READ_U16(pd + e.analog_voltage_1),
-        EC_READ_U16(pd + e.analog_voltage_2),
-        EC_READ_S16(pd + e.temperature),
-        EC_READ_S16(pd + e.acceleration_1),
-        EC_READ_S16(pd + e.acceleration_2),
-        EC_READ_S16(pd + e.acceleration_3),
-        EC_READ_U16(pd + e.rs485_inputs_count),
-        EC_READ_U16(pd + e.rs485_inputs_len));
+void write_servo_zero_output(uint8_t *pd, const ServoOutputOffsets &o) {
+    EC_WRITE_S32(pd + o.target_position, 0);
+    EC_WRITE_U32(pd + o.digital_outputs, 0);
+    EC_WRITE_S32(pd + o.target_velocity, 0);
+    EC_WRITE_U16(pd + o.control_word, 0x0000);
+    EC_WRITE_S16(pd + o.target_torque, 0);
+    EC_WRITE_U8(pd + o.operation_mode, 0);
+    EC_WRITE_U8(pd + o.safe_control, 0);
+    EC_WRITE_S32(pd + o.target_safe_position, 0);
+    EC_WRITE_U32(pd + o.user_output, 0);
 }
 
-/*
- * 周期性写入默认输出 PDO。
- *
- * 当前程序不做使能和运动，所有 RxPDO 输出保持 0；但输出区必须被写入并 queue，
- * 否则从站 SM2 输出区没有有效过程数据。
- */
-void write_default_outputs(App &app) {
-    uint8_t *pd = app.domain_pd;
-
-    for (size_t i = 0; i < kServoCount; ++i) {
-        const ServoOutputOffsets &o = app.servo_output_offsets[i];
-
-        EC_WRITE_S32(pd + o.target_position, 0);
-        EC_WRITE_U32(pd + o.digital_outputs, 0);
-        EC_WRITE_S32(pd + o.target_velocity, 0);
-        EC_WRITE_U16(pd + o.control_word, 0x0000);
-        EC_WRITE_S16(pd + o.target_torque, 0);
-        EC_WRITE_U8(pd + o.operation_mode, 0);
-        EC_WRITE_U8(pd + o.safe_control, 0);
-        EC_WRITE_S32(pd + o.target_safe_position, 0);
-        EC_WRITE_U32(pd + o.user_output, 0);
-    }
-
-    const EndIoOutputOffsets &e = app.endio_output_offsets;
-
+void write_endio_zero_output(uint8_t *pd, const EndIoOutputOffsets &e) {
     EC_WRITE_U8(pd + e.led_work_control, 0);
     EC_WRITE_U8(pd + e.digital_outputs_control, 0);
     EC_WRITE_U16(pd + e.rs485_outputs_count, 0);
@@ -461,24 +414,195 @@ void write_default_outputs(App &app) {
     }
 }
 
+void hold_motion_servo_position(App &app, uint16_t control_word) {
+    uint8_t *pd = app.domain_pd;
+    const ServoOutputOffsets &out = app.servo_output_offsets[kMotionServoIndex];
+    const ServoOffsets &in = app.servo_offsets[kMotionServoIndex];
+    const int32_t actual_position = EC_READ_S32(pd + in.actual_position);
+
+    EC_WRITE_S32(pd + out.target_position, actual_position);
+    EC_WRITE_U32(pd + out.digital_outputs, 0);
+    EC_WRITE_S32(pd + out.target_velocity, 0);
+    EC_WRITE_U16(pd + out.control_word, control_word);
+    EC_WRITE_S16(pd + out.target_torque, 0);
+    EC_WRITE_U8(pd + out.operation_mode, kDriveOperationMode);
+    EC_WRITE_U8(pd + out.safe_control, 0);
+    EC_WRITE_S32(pd + out.target_safe_position, 0);
+    EC_WRITE_U32(pd + out.user_output, 0);
+}
+
+void set_servo_control_state(ServoMotionControl &control,
+                             ServoControlState state) {
+    control.state = state;
+    control.state_cycles = 0;
+}
+
+void log_servo6_control_step(const char *step,
+                             uint16_t status_word,
+                             int32_t actual_position,
+                             uint16_t control_word) {
+    std::printf("Servo 6 control: %-18s status=0x%04X actual=%d "
+                "control=0x%04X\n",
+                step,
+                status_word,
+                actual_position,
+                control_word);
+}
+
 /*
- * 每秒打印一次主站和 domain 快照，便于确认 domain size / WKC 是否正常。
+ * 第 6 轴 CiA402 使能和小范围往返运动。
+ *
+ * 只对 kMotionServoIndex 写 0x6040/0x607A/0x6060；其它 5 个伺服继续写 0，
+ * 避免误使能。使能完成后锁存当前实际位置为 base，再执行以 base 为中心
+ * 的正弦位置轨迹；启动阶段用渐变包络逐步拉起振幅，避免速度突变。
  */
-void print_periodic_status(App &app, uint64_t cycle) {
-    ec_master_state_t master_state {};
-    ec_domain_state_t domain_state {};
+void update_motion_servo_control(App &app, ServoMotionControl &control) {
+    uint8_t *pd = app.domain_pd;
+    const ServoOffsets &in = app.servo_offsets[kMotionServoIndex];
+    const ServoOutputOffsets &out =
+        app.servo_output_offsets[kMotionServoIndex];
+    const uint16_t status_word = EC_READ_U16(pd + in.status_word);
+    const int32_t actual_position = EC_READ_S32(pd + in.actual_position);
+    const ec_slave_config_state_t &servo6_state =
+        app.servo_states[kMotionServoIndex];
 
-    ecrt_master_state(app.master, &master_state);
-    ecrt_domain_state(app.domain, &domain_state);
+    if (!servo6_state.online || !servo6_state.operational ||
+        servo6_state.al_state != 0x08) {
+        if (!control.waiting_op_logged) {
+            std::printf("Servo 6 control: waiting OP, AL=0x%02X online=%u "
+                        "OP=%u\n",
+                        servo6_state.al_state,
+                        servo6_state.online,
+                        servo6_state.operational);
+            control.waiting_op_logged = true;
+        }
+        write_servo_zero_output(pd, out);
+        return;
+    }
 
-    std::printf("\ncycle=%llu master slaves=%u al_states=0x%02X link=%s "
-                "domain wc=%u wc_state=%u\n",
-                static_cast<unsigned long long>(cycle),
-                master_state.slaves_responding,
-                master_state.al_states,
-                master_state.link_up ? "up" : "down",
-                domain_state.working_counter,
-                domain_state.wc_state);
+    if (control.waiting_op_logged) {
+        std::printf("Servo 6 control: OP ready, status=0x%04X actual=%d\n",
+                    status_word,
+                    actual_position);
+        control.waiting_op_logged = false;
+    }
+
+    if (status_word == 0) {
+        hold_motion_servo_position(app, 0x0000);
+        return;
+    }
+
+    switch (control.state) {
+    case ServoControlState::WaitStatus:
+        hold_motion_servo_position(app, 0x0006);
+        log_servo6_control_step("start 0x06",
+                                status_word,
+                                actual_position,
+                                0x0006);
+        set_servo_control_state(control, ServoControlState::Enable06);
+        break;
+
+    case ServoControlState::Enable06:
+        hold_motion_servo_position(app, 0x0006);
+        if (++control.state_cycles >= kEnableStepCycles) {
+            log_servo6_control_step("0x06 -> 0x07",
+                                    status_word,
+                                    actual_position,
+                                    0x0007);
+            set_servo_control_state(control, ServoControlState::Enable07);
+        }
+        break;
+
+    case ServoControlState::Enable07:
+        hold_motion_servo_position(app, 0x0007);
+        if (++control.state_cycles >= kEnableStepCycles) {
+            log_servo6_control_step("0x07 -> 0x0F",
+                                    status_word,
+                                    actual_position,
+                                    0x000F);
+            set_servo_control_state(control, ServoControlState::Enable0F);
+        }
+        break;
+
+    case ServoControlState::Enable0F:
+        hold_motion_servo_position(app, 0x000F);
+        if (++control.state_cycles >= kEnableStepCycles) {
+            control.base_position = actual_position;
+            control.motion_cycles = 0;
+            log_servo6_control_step("motion ready",
+                                    status_word,
+                                    actual_position,
+                                    0x000F);
+            set_servo_control_state(control, ServoControlState::SineMotion);
+            std::printf("Servo 6 motion: base=%d amplitude=%d "
+                        "peak_to_peak=%d period=%llu cycles ramp=%llu cycles\n",
+                        control.base_position,
+                        kMotionAmplitudeCounts,
+                        kMotionRangeCounts,
+                        static_cast<unsigned long long>(kMotionPeriodCycles),
+                        static_cast<unsigned long long>(kMotionRampCycles));
+        }
+        break;
+
+    case ServoControlState::SineMotion: {
+        const double phase = 2.0 * kPi *
+            static_cast<double>(control.motion_cycles) /
+            static_cast<double>(kMotionPeriodCycles);
+        const double ramp_progress = control.motion_cycles >= kMotionRampCycles ?
+            1.0 : static_cast<double>(control.motion_cycles) /
+                static_cast<double>(kMotionRampCycles);
+        const double envelope = 0.5 - 0.5 * std::cos(kPi * ramp_progress);
+        const double amplitude = static_cast<double>(kMotionAmplitudeCounts);
+        const double offset = envelope * amplitude * std::sin(phase);
+        const int32_t target_position =
+            control.base_position + static_cast<int32_t>(std::lround(offset));
+
+        EC_WRITE_S32(pd + out.target_position, target_position);
+        EC_WRITE_U32(pd + out.digital_outputs, 0);
+        EC_WRITE_S32(pd + out.target_velocity, 0);
+        EC_WRITE_U16(pd + out.control_word, 0x000F);
+        EC_WRITE_S16(pd + out.target_torque, 0);
+        EC_WRITE_U8(pd + out.operation_mode, kDriveOperationMode);
+        EC_WRITE_U8(pd + out.safe_control, 0);
+        EC_WRITE_S32(pd + out.target_safe_position, 0);
+        EC_WRITE_U32(pd + out.user_output, 0);
+
+        control.motion_cycles =
+            (control.motion_cycles + 1) % kMotionPeriodCycles;
+        break;
+    }
+    }
+}
+
+/*
+ * 周期性写入输出 PDO。
+ *
+ * 前 5 个伺服和末端 IO 只刷新默认 0 输出；最后一个伺服关节单独上使能并
+ * 做小范围慢速往返运动。
+ */
+void write_cycle_outputs(App &app, ServoMotionControl &control) {
+    uint8_t *pd = app.domain_pd;
+
+    for (size_t i = 0; i < kServoCount; ++i) {
+        if (i == kMotionServoIndex) {
+            continue;
+        }
+        write_servo_zero_output(pd, app.servo_output_offsets[i]);
+    }
+
+    update_motion_servo_control(app, control);
+    write_endio_zero_output(pd, app.endio_output_offsets);
+}
+
+/* 激活 master 后先写一次全零输出，等待首个有效 TxPDO 后再执行第 6 轴控制。 */
+void write_default_outputs(App &app) {
+    uint8_t *pd = app.domain_pd;
+
+    for (size_t i = 0; i < kServoCount; ++i) {
+        write_servo_zero_output(pd, app.servo_output_offsets[i]);
+    }
+
+    write_endio_zero_output(pd, app.endio_output_offsets);
 }
 
 
@@ -608,6 +732,8 @@ void queue_dc_monitor(App &app, QualityStats &stats, uint64_t cycle) {
 void print_quality_report(App &app,
                           const QualityStats &stats,
                           bool final_report) {
+    /* 退出报告和分钟报告共用同一套统计口径，保持与 GSD620 示例一致。 */
+    const char *title = final_report ? "Ctrl+C 最终汇总" : "每分钟累计";
     ec_master_state_t master_state {};
     ec_domain_state_t domain_state {};
     std::array<ec_slave_config_state_t, kServoCount> servo_states {};
@@ -658,19 +784,19 @@ void print_quality_report(App &app,
     const uint32_t wc_min = stats.min_working_counter == UINT_MAX ?
         0 : stats.min_working_counter;
 
-    std::printf("============================================================\n");
-    std::printf("              IgH 通信质量报告（%s）\n",
-                final_report ? "Ctrl+C 最终汇总" : "一分钟周期快照");
+    std::printf("\n============================================================\n");
+    std::printf("              IgH 通信质量报告（%s）\n", title);
     std::printf("============================================================\n");
 
     if (!stats.active) {
         std::printf("[统计状态]\n");
         std::printf("  7 个从站尚未全部进入 OP，本次没有有效运行期通信样本。\n");
-        std::printf("  INIT / PREOP / SAFEOP 启动阶段数据均未计入。\n");
+        std::printf("  INIT / PRE-OP / SAFE-OP 启动阶段数据均未计入。\n");
         std::printf("============================================================\n");
         return;
     }
 
+    /* 周期质量只统计全部从站进入 OP 之后的运行期样本。 */
     std::printf("[运行概况]\n");
     std::printf("  运行时长          : %12.3f s\n", runtime_s);
     std::printf("  累计周期          : %12llu\n",
@@ -688,6 +814,7 @@ void print_quality_report(App &app,
     std::printf("  严重超周期次数    : %12llu  (> 150%% 标称周期)\n",
                 static_cast<unsigned long long>(stats.severe_overruns));
 
+    /* Domain 的 WC 状态用于衡量本周期过程数据是否完整交换。 */
     std::printf("[Domain 过程数据质量]\n");
     std::printf("  完整周期          : %12llu\n",
                 static_cast<unsigned long long>(stats.domain_complete_cycles));
@@ -695,18 +822,14 @@ void print_quality_report(App &app,
                 static_cast<unsigned long long>(stats.domain_incomplete_cycles));
     std::printf("  无过程数据周期    : %12llu\n",
                 static_cast<unsigned long long>(stats.domain_zero_cycles));
-    std::printf("  Domain 状态失败   : %12llu\n",
+    std::printf("  Domain 读取失败   : %12llu\n",
                 static_cast<unsigned long long>(stats.domain_state_read_errors));
     std::printf("  通信成功率        : %12.6f %%\n", success_rate);
-    std::printf("  WC 当前 / 最小 / 最大 : %8u / %8u / %8u\n",
-                stats.wc_last, wc_min, stats.max_working_counter);
-    std::printf("  Domain 当前状态   : wc=%u state=%u\n",
-                domain_state.working_counter, domain_state.wc_state);
+    std::printf("  WC 最小 / 最大    : %12u / %u\n",
+                wc_min, stats.max_working_counter);
 
+    /* DC 误差来自 IgH sync monitor，单位统一换算成 us 方便对比。 */
     std::printf("[DC 同步质量]\n");
-    std::printf("  统计来源          : IgH sync monitor\n");
-    std::printf("  DC 配置           : 6 个伺服参与 DC，EndIO 不配置 DC\n");
-    std::printf("  DC 参考从站       : Servo 1 / position 0\n");
     std::printf("  有效 / 无效采样   : %12llu / %llu\n",
                 static_cast<unsigned long long>(stats.dc_valid_samples),
                 static_cast<unsigned long long>(stats.dc_invalid_samples));
@@ -714,49 +837,64 @@ void print_quality_report(App &app,
     std::printf("  最大绝对误差      : %12.3f us\n",
                 ns_to_us(stats.max_dc_diff_ns));
 
+    /* 6 个伺服逐行打印反馈值和主站下发值，便于对照目标与实际。 */
+    std::printf("[PDO 与从站状态]\n");
+    const uint8_t *pd = app.domain_pd;
+    for (size_t i = 0; i < kServoCount; ++i) {
+        const ServoOffsets &in = app.servo_offsets[i];
+        const ServoOutputOffsets &out = app.servo_output_offsets[i];
+        std::printf("  Servo %zu actual status/mode/pos/vel/err: "
+                    "0x%04X / %d / %d / %d / 0x%08X\n",
+                    i + 1,
+                    EC_READ_U16(pd + in.status_word),
+                    EC_READ_S8(pd + in.operation_mode_display),
+                    EC_READ_S32(pd + in.actual_position),
+                    EC_READ_S32(pd + in.actual_velocity),
+                    EC_READ_U32(pd + in.error_code));
+        std::printf("          target ctrl/mode/pos          : "
+                    "0x%04X / %d / %d\n",
+                    EC_READ_U16(pd + out.control_word),
+                    EC_READ_S8(pd + out.operation_mode),
+                    EC_READ_S32(pd + out.target_position));
+    }
+
+    /* EndIO 单独打印数字量、模拟量和 RS485 输入长度，便于现场快速核对。 */
+    const EndIoOffsets &e = app.endio_offsets;
+    std::printf("  EndIO %u err/din     :       0x%02X / 0x%02X\n",
+                kEndIoLogicalId,
+                EC_READ_U8(pd + e.error_code),
+                EC_READ_U8(pd + e.digital_inputs));
+    std::printf("          ai1/ai2/temp : %12u / %u / %d\n",
+                EC_READ_U16(pd + e.analog_voltage_1),
+                EC_READ_U16(pd + e.analog_voltage_2),
+                EC_READ_S16(pd + e.temperature));
+    std::printf("          acc xyz      : %12d / %d / %d\n",
+                EC_READ_S16(pd + e.acceleration_1),
+                EC_READ_S16(pd + e.acceleration_2),
+                EC_READ_S16(pd + e.acceleration_3));
+    std::printf("          rs485 cnt/len: %12u / %u\n",
+                EC_READ_U16(pd + e.rs485_inputs_count),
+                EC_READ_U16(pd + e.rs485_inputs_len));
+
     std::printf("[主站与从站状态]\n");
-    std::printf("  主站链路          : %12s\n", master_state.link_up ? "正常" : "异常");
+    std::printf("  主站链路          : %12s\n", master_state.link_up ? "正常" : "断开");
     std::printf("  响应从站数        : %12u\n", master_state.slaves_responding);
     std::printf("  主站 AL 状态      :         0x%02X\n", master_state.al_states);
     std::printf("  从站在线 / OP     : %12zu / %zu\n", online_count, op_count);
-
-    std::printf("[伺服状态快照]\n");
-    const uint8_t *pd = app.domain_pd;
+    std::printf("  Domain 当前状态   :     wc=%u state=%u\n",
+                domain_state.working_counter, domain_state.wc_state);
     for (size_t i = 0; i < kServoCount; ++i) {
-        const ServoOffsets &o = app.servo_offsets[i];
-        std::printf("  Servo %zu: AL=0x%02X online=%u OP=%u status=0x%04X "
-                    "mode=%d pos=%d vel=%d torque=%d err=0x%08X sync0_pdo=%u\n",
+        std::printf("  Servo %zu AL/online/OP:   0x%02X / %u / %u\n",
                     i + 1,
                     servo_states[i].al_state,
                     servo_states[i].online,
-                    servo_states[i].operational,
-                    EC_READ_U16(pd + o.status_word),
-                    EC_READ_S8(pd + o.operation_mode_display),
-                    EC_READ_S32(pd + o.actual_position),
-                    EC_READ_S32(pd + o.actual_velocity),
-                    EC_READ_S16(pd + o.actual_torque),
-                    EC_READ_U32(pd + o.error_code),
-                    EC_READ_U16(pd + o.sync0_time_difference));
+                    servo_states[i].operational);
     }
-
-    const EndIoOffsets &e = app.endio_offsets;
-    std::printf("[EndIO 状态快照]\n");
-    std::printf("  EndIO %u: AL=0x%02X online=%u OP=%u err=0x%02X din=0x%02X "
-                "ai1=%u ai2=%u temp=%d acc=(%d,%d,%d) rs485_count=%u rs485_len=%u\n",
+    std::printf("  EndIO %u AL/online/OP:   0x%02X / %u / %u\n",
                 kEndIoLogicalId,
                 endio_state.al_state,
                 endio_state.online,
-                endio_state.operational,
-                EC_READ_U8(pd + e.error_code),
-                EC_READ_U8(pd + e.digital_inputs),
-                EC_READ_U16(pd + e.analog_voltage_1),
-                EC_READ_U16(pd + e.analog_voltage_2),
-                EC_READ_S16(pd + e.temperature),
-                EC_READ_S16(pd + e.acceleration_1),
-                EC_READ_S16(pd + e.acceleration_2),
-                EC_READ_S16(pd + e.acceleration_3),
-                EC_READ_U16(pd + e.rs485_inputs_count),
-                EC_READ_U16(pd + e.rs485_inputs_len));
+                endio_state.operational);
     std::printf("============================================================\n");
 }
 
@@ -864,9 +1002,16 @@ void run(App &app, volatile std::sig_atomic_t &keep_running) {
     std::printf("starting 1 ms SINSUN EtherCAT communication loop\n");
     std::printf("topology: servo id 1-6, endio id 7, DC assign=0x%04X\n",
                 kDcAssignActivate);
+    std::printf("motion: only Servo 6 enabled, amplitude=%d pulse, "
+                "peak_to_peak=%d pulse, period=%llu ms ramp=%llu ms\n",
+                kMotionAmplitudeCounts,
+                kMotionRangeCounts,
+                static_cast<unsigned long long>(kMotionPeriodCycles),
+                static_cast<unsigned long long>(kMotionRampCycles));
 
     /* cycle：1 ms 通讯周期计数，用于控制打印和 DC 同步节拍。 */
     uint64_t cycle = 0;
+    ServoMotionControl motion_control {};
 
     while (keep_running) {
         add_ns(wakeup, kCycleTimeNs);
@@ -892,8 +1037,8 @@ void run(App &app, volatile std::sig_atomic_t &keep_running) {
 
         update_dc_monitor(app, quality_stats, cycle);
 
-        /* 即使不做使能/运动，也要每周期刷新输出 PDO 默认值。 */
-        write_default_outputs(app);
+        /* 控制 PDO 必须每个 1 ms 周期刷新；quality_stats.active 只用于统计。 */
+        write_cycle_outputs(app, motion_control);
 
         if (cycle > 0 && quality_stats.active && quality_stats.cycles > 0 &&
             quality_stats.cycles % kQualityReportPeriodCycles == 0) {

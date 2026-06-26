@@ -11,8 +11,8 @@ namespace sinsun {
 /*
  * 伺服 RxPDO entry 列表。
  *
- * RxPDO 是主站写给伺服的数据。本程序只做通讯和打印，不做使能/运动，
- * 但仍按 ESI 的固定 PDO 映射完整配置，输出过程数据保持默认 0。
+ * RxPDO 是主站写给伺服的数据。当前程序只使能最后一个伺服关节并做
+ * 小范围往返运动，其余伺服仍保持默认 0 输出。
  */
 inline const ec_pdo_entry_info_t servo_rxpdo_entries[] = {
     {0x607A, 0x00, 32}, {0x60FE, 0x00, 32}, {0x60FF, 0x00, 32},
@@ -114,8 +114,8 @@ inline const ec_sync_info_t endio_syncs[] = {
 
 /* 伺服 RxPDO 输出 entry 在 process data 区里的字节偏移。
  *
- * 这些 offset 必须注册进 domain。即使当前不做使能/运动，也要周期性写默认
- * 输出值，否则 domain 只会包含 TxPDO 输入区，IgH 只发 LRD，SM2 输出区不会被刷新。
+ * 这些 offset 必须注册进 domain。前 5 个伺服周期性写默认 0 输出，第 6 个
+ * 伺服写入控制字、模式和目标位置，否则 SM2 输出区不会被刷新。
  */
 struct ServoOutputOffsets {
     /* 0x607A:00，目标位置。 */

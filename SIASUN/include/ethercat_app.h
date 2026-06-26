@@ -24,7 +24,7 @@ struct App {
     ec_slave_config_t *endio_config = nullptr;
     /* 激活 master 后取得的 domain process data 起始地址。 */
     uint8_t *domain_pd = nullptr;
-    /* 6 个伺服 RxPDO 输出 entry 偏移；即使不运动，也要周期性写默认输出。 */
+    /* 6 个伺服 RxPDO 输出 entry 偏移；第 6 轴用于使能和小范围运动。 */
     std::array<ServoOutputOffsets, kServoCount> servo_output_offsets{};
     /* 末端 IO RxPDO 输出 entry 偏移。 */
     EndIoOutputOffsets endio_output_offsets{};
