@@ -75,6 +75,15 @@ int configure_servo(App &app, size_t index) {
         return -1;
     }
 
+    /*
+     * 为当前伺服配置分布式时钟：
+     * - AssignActivate = 0x0300，启用设备 ESI 定义的 DC/Sync0 模式；
+     * - Sync0 周期为 1 ms，和主站 PDO 周期保持一致；
+     * - Sync0 shift 为 0，不额外平移触发相位；
+     * - Sync1 周期和 shift 都为 0，本程序不使用 Sync1。
+     *
+     * 这里仅保存配置；真正写入从站并完成 DC 状态切换发生在 Master 激活后。
+     */
     ecrt_slave_config_dc(config, kDcAssignActivate, kCycleTimeNs, 0, 0, 0);
     app.servo_configs[index] = config;
     return 0;
@@ -1063,6 +1072,13 @@ int configure(App &app, const std::string &axis_config_directory) {
         return -1;
     }
 
+    /*
+     * 明确选择 Servo 1 作为整条 EtherCAT 总线的 DC 参考时钟。
+     *
+     * servo_configs[0] 的数组下标 0 对应逻辑 id 1、总线 position 0。
+     * 后续每个周期先让这个参考时钟跟随应用时间，再让其它 DC 从站时钟
+     * 跟随 Servo 1；因此 Servo 1 是从站时钟树的时间基准。
+     */
     if (ecrt_master_select_reference_clock(app.master, app.servo_configs[0])) {
         std::fprintf(stderr, "failed to select Servo 1 as DC reference clock\n");
         return -1;
@@ -1090,15 +1106,39 @@ int configure(App &app, const std::string &axis_config_directory) {
  *
  * app：主站运行期上下文，提供 master/domain/process data。
  * keep_running：信号处理函数会置 0，循环据此退出。
+ * config：控制运动开关、最大周期数、DC 同步频率和质量报告频率。
+ *
+ * 当前 DC 同步关系：
+ *
+ *   CLOCK_MONOTONIC 应用时间
+ *              |
+ *              | ecrt_master_application_time()
+ *              v
+ *   Servo 1 DC 参考时钟（configure() 中明确选择）
+ *              |
+ *              | ecrt_master_sync_slave_clocks()
+ *              v
+ *   Servo 2-6 以及总线上其它支持 DC 的从站时钟
+ *
+ * ecrt_master_sync_reference_clock() 和 ecrt_master_sync_slave_clocks()
+ * 只负责把同步报文加入本周期发送队列；真正发出报文的位置是周期末尾的
+ * ecrt_master_send()。DC monitor 只测量各从站时钟差，不参与时钟校正。
  */
 void run(App &app,
          volatile std::sig_atomic_t &keep_running,
          const RunConfig &config) {
-    /* wakeup：下一次周期唤醒的绝对时间。 */
+    /*
+     * wakeup：下一次周期唤醒的绝对时间。
+     *
+     * 每周期都在上一次绝对时间上增加 1 ms，避免使用相对 sleep 时把每次
+     * 执行耗时逐步累积成周期漂移。
+     */
     timespec wakeup {};
 
+    /* 以进入 run() 时的 CLOCK_MONOTONIC 时间建立第一个周期基准点。 */
     clock_gettime(CLOCK_MONOTONIC, &wakeup);
 
+    /* quality_stats：累计保存 OP 之后的周期、WC 和 DC 质量统计。 */
     QualityStats quality_stats {};
 
     std::printf("starting 1 ms SINSUN EtherCAT communication loop\n");
@@ -1123,40 +1163,91 @@ void run(App &app,
 
     /* cycle：1 ms 通讯周期计数，用于控制打印和 DC 同步节拍。 */
     uint64_t cycle = 0;
+
+    /* motion_control：保存 Servo 6 使能步骤和正弦运动的跨周期状态。 */
     ServoMotionControl motion_control {};
 
     while (keep_running) {
+        /*
+         * 计算下一个绝对唤醒点并睡眠到该时刻。
+         *
+         * TIMER_ABSTIME 表示 wakeup 是绝对时间，不是“再睡 1 ms”。
+         */
         add_ns(wakeup, kCycleTimeNs);
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup, nullptr);
 
-        /* app_time：传给 IgH 的 application time，单位 ns。 */
+        /*
+         * app_time：传给 IgH DC 算法的应用时间，单位 ns。
+         *
+         * 当前代码使用计划唤醒点 wakeup，因此每周期严格增加 1 ms；即使
+         * 线程本周期实际晚醒，传入的时间轴仍保持理想的 1 ms 步进。
+         */
         const uint64_t app_time = static_cast<uint64_t>(timespec_to_ns(wakeup));
+
+        /*
+         * 保存本周期应用时间。后面的 sync_reference_clock() 会使用这里
+         * 最近一次提交的时间，生成“Servo 1 参考时钟跟随应用时间”的报文。
+         */
         ecrt_master_application_time(app.master, app_time);
 
+        /*
+         * 轮询 ec_igc 网卡接收队列，解析上一周期发送后返回的 EtherCAT
+         * 帧，并更新各 datagram 的接收状态和 Working Counter。
+         */
         ecrt_master_receive(app.master);
+
+        /*
+         * 将刚收到的过程数据交给 domain 处理。调用后，domain_pd 中各
+         * TxPDO 输入区域才表示本周期最新的伺服和末端 IO 数据。
+         */
         ecrt_domain_process(app.domain);
 
+        /* domain_state：保存本周期 Working Counter 和 WC 完整性状态。 */
         ec_domain_state_t domain_state {};
+
+        /*
+         * domain_state_ptr：读取成功时指向有效状态；失败时保持 nullptr，
+         * 质量统计会把它记为一次 Domain 状态读取失败。
+         */
         const ec_domain_state_t *domain_state_ptr = nullptr;
         if (ecrt_domain_state(app.domain, &domain_state) == 0) {
             domain_state_ptr = &domain_state;
         }
 
+        /* 只在 Master、Domain 或从站状态变化时打印，避免每毫秒刷屏。 */
         print_state_changes(app);
 
+        /*
+         * 只有 6 个伺服和 EndIO 全部进入 OP 后才开始累计质量数据，避免
+         * 把 PRE-OP/SAFE-OP 启动阶段计入稳态通信结果。
+         */
         quality_update_after_op(app, quality_stats, monotonic_raw_ns(),
                                 domain_state_ptr);
 
+        /*
+         * 处理先前发出的 DC monitor 报文响应。
+         *
+         * monitor 每 1000 个周期（1 秒）采样一次 0x092C System Time
+         * Difference，得到各 DC 从站相对参考时钟 Servo 1 的最大时间差
+         * 上界。这个函数只读取统计结果，不修改任何时钟。
+         */
         update_dc_monitor(app, quality_stats, cycle);
 
         if (config.enable_motion) {
-            /* 正式控制模式按原逻辑刷新 Servo 6 的控制输出。 */
+            /*
+             * 运动测试模式：前 5 个伺服保持零输出，Servo 6 按 CiA402
+             * 使能步骤和正弦老化轨迹刷新 RxPDO，EndIO 保持零输出。
+             */
             write_cycle_outputs(app, motion_control);
         } else {
-            /* 被动测试模式每周期保持全部输出为 0，防止意外使能或运动。 */
+            /* 纯通讯模式：每周期把全部 RxPDO 输出刷新为 0。 */
             write_default_outputs(app);
         }
 
+        /*
+         * 按配置打印累计质量报告。测试程序把该值设为 0，因此通常只在
+         * 退出时打印最终报告；正式程序可按非零周期数定时打印。
+         */
         if (config.report_period_cycles > 0 &&
             cycle > 0 &&
             quality_stats.active &&
@@ -1165,23 +1256,57 @@ void run(App &app,
             print_quality_report(app, quality_stats, false);
         }
 
+        /*
+         * DC 校正第一步：同步参考时钟 Servo 1。
+         *
+         * 将“Servo 1 DC 参考时钟跟随最近一次 application_time”的报文
+         * 加入 Master 队列。此调用只是排队，报文尚未发到网线上。
+         */
         if (config.dc_sync_period_cycles > 0 &&
             cycle % config.dc_sync_period_cycles == 0) {
             ecrt_master_sync_reference_clock(app.master);
+
+            /*
+             * DC 校正第二步：同步其余 DC 从站。
+             *
+             * 将“其它 DC 从站时钟跟随 Servo 1 参考时钟”的报文加入同一个
+             * Master 队列。默认每个 1 ms 周期都执行两步校正。
+             */
             ecrt_master_sync_slave_clocks(app.master);
         }
 
+        /*
+         * 每 1000 周期把 DC monitor 广播读报文加入队列。该报文会在下面
+         * master_send() 发出，其响应在后续周期由 update_dc_monitor()
+         * 处理，因此监控链路和校正链路彼此独立。
+         */
         queue_dc_monitor(app, quality_stats, cycle);
 
+        /*
+         * 把本周期 domain 的过程数据报文加入 Master 发送队列。此前写入
+         * domain_pd 的控制字、目标位置等输出会由这个 domain 报文携带。
+         */
         ecrt_domain_queue(app.domain);
+
+        /*
+         * 一次性发送本周期已排队的报文，包括：
+         * - PDO 过程数据；
+         * - Servo 1 参考时钟校正；
+         * - 其它 DC 从站时钟校正；
+         * - 到采样周期时的 DC monitor。
+         */
         ecrt_master_send(app.master);
+
+        /* 完成一个 1 ms 通讯周期后更新累计周期数。 */
         ++cycle;
 
+        /* 测试达到指定周期数后自然退出；0 表示只响应外部停止信号。 */
         if (config.max_cycles > 0 && cycle >= config.max_cycles) {
             keep_running = 0;
         }
     }
 
+    /* 循环结束后打印从全部从站进入 OP 起累计的最终质量报告。 */
     print_quality_report(app, quality_stats, true);
 }
 

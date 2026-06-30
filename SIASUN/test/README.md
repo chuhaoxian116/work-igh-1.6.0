@@ -141,7 +141,7 @@ PREEMPT_RT、ec_igc、1 ms、FIFO 99、mlock 开、Servo 6 老化运动
 | T07 | CPU 2 | mixed | CPU 1、5 | CPU 100% + 8G | 1 | 测试混合高负载 |
 | T08 | CPU 2 | idle | - | CPU 6 保持空闲 | 2 | 比较每 2 周期 DC 同步 |
 | T09 | CPU 2 | idle | - | CPU 6 保持空闲 | 5 | 比较每 5 周期 DC 同步 |
-| T10 | CPU 2 | mixed | CPU 1、5 | CPU 100% + 8G | 2 | 混合负载下比较 DC 间隔 |
+| T10 | CPU 2 | mixed | CPU 2 | CPU 100% + 16G | 1 | 混合负载下比较 DC 间隔 |
 | T11 | 最优配置 | mixed | 其它核心 | CPU 100% + 8G | 最优值 | 8 小时长稳测试 |
 
 ## 第一阶段命令
@@ -218,6 +218,16 @@ sudo env TEST_TAG=T07 TEST_BIN="$TEST_BIN" AXIS_DIR="$AXIS_DIR" \
 ```
 
 T08/T09 只修改 `TEST_TAG` 和 `DC_SYNC_CYCLES`，不要同时修改负载。
+
+混合压力：
+
+```sh
+sudo env TEST_TAG=T10 TEST_BIN="$TEST_BIN" AXIS_DIR="$AXIS_DIR" \
+    DURATION_S=1800 CPU_ID=2 POLICY=fifo PRIORITY=-1 MLOCK=1 \
+    DC_SYNC_CYCLES=1 LOAD_PROFILE=mixed LOAD_CPUSET=2 \
+    CPU_WORKERS=1 CPU_LOAD=100 VM_WORKERS=1 VM_BYTES=8G \
+    ./run_realtime_test.sh
+```
 
 ## EtherCAT-OP 测试
 
