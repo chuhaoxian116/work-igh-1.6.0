@@ -15,7 +15,7 @@ myproject/
 ├── GSD620/
 │   ├── CMakeLists.txt
 │   ├── include/
-│   └── src/
+│   ├── src/
 ├── SIASUN/
 │   ├── CMakeLists.txt
 │   ├── include/
@@ -29,6 +29,12 @@ myproject/
 │       ├── ethercat_app.cpp
 │       ├── main.cpp
 │       └── sdo_parameter.cpp
+│   └── test/
+│       ├── CMakeLists.txt
+│       ├── realtime_communication_test.cpp
+│       ├── run_igh_master_test.sh
+│       ├── run_realtime_test.sh
+│       └── README.md
 ├── doc/
 │   ├── GSD620/
 │   └── SIASUN/gcr10_1300/Axis1.xml ... Axis6.xml
@@ -53,6 +59,7 @@ cmake --build build
 ```text
 build/igh_master_gsd620
 build/igh_master_sinsun
+build/SIASUN/test/siasun_realtime_communication_test
 ```
 
 ## IgH 环境
@@ -136,6 +143,33 @@ constexpr bool kLogSdoDownloadDetails = true;
 ```
 
 如果现场输出太多，可以改成 `false`，保留汇总和错误日志。
+
+## SIASUN 实时与负载测试
+
+`SIASUN/test` 用于放置复用 `SIASUN/src` 和 `SIASUN/include` 接口的测试
+demo。当前提供的 `siasun_realtime_communication_test` 支持：
+
+- `SCHED_FIFO`、`SCHED_RR` 和 `SCHED_OTHER`
+- 实时优先级与 CPU 亲和性
+- 内存锁定开关
+- DC 同步频率
+- 固定测试时长
+- CPU、内存、缺页和上下文切换统计
+- 外部 CPU/内存混合高负载
+
+测试 demo 默认执行现有 Servo 6 单关节老化运动，便于现场直观观察；设置
+`ENABLE_MOTION=0` 可切换为所有输出保持为 0 的纯通讯模式。完整变量测试
+表、压力脚本参数和运行方式见：
+
+```text
+SIASUN/test/README.md
+```
+
+不需要构建测试 demo 时可以关闭：
+
+```sh
+cmake -S . -B build -DSIASUN_BUILD_TESTS=OFF
+```
 
 ## tinyxml2
 

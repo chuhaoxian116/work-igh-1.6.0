@@ -113,7 +113,6 @@ int configure_endio(App &app) {
  */
 constexpr size_t kMaxPdoEntryRegs = 256;
 
-constexpr uint64_t kQualityReportPeriodCycles = 10000;
 constexpr uint64_t kDcMonitorPeriodCycles = 1000;
 constexpr uint64_t kCycleOverrunLimitNs =
     (static_cast<uint64_t>(kCycleTimeNs) * 3ULL) / 2ULL;
@@ -900,23 +899,124 @@ void print_quality_report(App &app,
 
 }  // namespace
 
-/* 尽力设置实时调度和内存锁定；失败不退出，只打印 warning。 */
-void setup_realtime_process() {
-    /* param：SCHED_FIFO 调度参数，使用系统允许的最高优先级。 */
-    sched_param param {};
+namespace {
 
-    param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-    if (sched_setscheduler(0, SCHED_FIFO, &param) == -1) {
-        std::fprintf(stderr, "warning: sched_setscheduler failed: %s\n",
-                     std::strerror(errno));
+/*
+ * 将公共接口中的调度策略转换成 Linux sched_*() 使用的常量。
+ *
+ * policy：调用方选定的普通、FIFO 或 RR 调度策略。
+ */
+int native_scheduling_policy(SchedulingPolicy policy) {
+    switch (policy) {
+    case SchedulingPolicy::Other:
+        return SCHED_OTHER;
+    case SchedulingPolicy::Fifo:
+        return SCHED_FIFO;
+    case SchedulingPolicy::RoundRobin:
+        return SCHED_RR;
     }
 
-    if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
-        std::fprintf(stderr, "warning: mlockall failed: %s\n",
+    return SCHED_OTHER;
+}
+
+}  // namespace
+
+/* 按配置设置调度策略、CPU 亲和性和内存锁定；失败不退出。 */
+RealtimeSetupResult setup_realtime_process(const RealtimeConfig &config) {
+    /* result：记录每项实时设置是否生效以及最终实际值。 */
+    RealtimeSetupResult result {};
+
+    /* native_policy：Linux sched_setscheduler() 接受的调度策略。 */
+    const int native_policy = native_scheduling_policy(config.policy);
+
+    /* minimum_priority：当前调度策略允许的最低优先级。 */
+    const int minimum_priority = sched_get_priority_min(native_policy);
+
+    /* maximum_priority：当前调度策略允许的最高优先级。 */
+    const int maximum_priority = sched_get_priority_max(native_policy);
+
+    /* requested_priority：-1 时选择当前策略的最高优先级。 */
+    const int requested_priority =
+        config.priority < 0 ? maximum_priority : config.priority;
+
+    /* param：传给 sched_setscheduler() 的线程优先级参数。 */
+    sched_param param {};
+    param.sched_priority = requested_priority;
+
+    if (minimum_priority == -1 || maximum_priority == -1 ||
+        requested_priority < minimum_priority ||
+        requested_priority > maximum_priority) {
+        std::fprintf(stderr,
+                     "warning: invalid scheduler priority %d, range=%d..%d\n",
+                     requested_priority,
+                     minimum_priority,
+                     maximum_priority);
+    } else if (sched_setscheduler(0, native_policy, &param) == -1) {
+        std::fprintf(stderr, "warning: sched_setscheduler failed: %s\n",
                      std::strerror(errno));
+    } else {
+        result.scheduler_configured = true;
+    }
+
+    result.affinity_configured = config.cpu_id < 0;
+    if (config.cpu_id >= 0) {
+        /* cpu_set：只保留目标逻辑 CPU 的进程亲和性掩码。 */
+        cpu_set_t cpu_set;
+        CPU_ZERO(&cpu_set);
+
+        if (config.cpu_id >= CPU_SETSIZE) {
+            std::fprintf(stderr,
+                         "warning: cpu id %d exceeds CPU_SETSIZE=%d\n",
+                         config.cpu_id,
+                         CPU_SETSIZE);
+        } else {
+            CPU_SET(config.cpu_id, &cpu_set);
+            if (sched_setaffinity(0, sizeof(cpu_set), &cpu_set) == -1) {
+                std::fprintf(stderr,
+                             "warning: sched_setaffinity CPU %d failed: %s\n",
+                             config.cpu_id,
+                             std::strerror(errno));
+            } else {
+                result.affinity_configured = true;
+            }
+        }
+    }
+
+    result.memory_locked = !config.lock_memory;
+    if (config.lock_memory) {
+        if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
+            std::fprintf(stderr, "warning: mlockall failed: %s\n",
+                         std::strerror(errno));
+        } else {
+            result.memory_locked = true;
+        }
     }
 
     prefault_stack();
+
+    /* actual_param：由操作系统返回的当前实际线程优先级。 */
+    sched_param actual_param {};
+    result.actual_policy = sched_getscheduler(0);
+    if (sched_getparam(0, &actual_param) == 0) {
+        result.actual_priority = actual_param.sched_priority;
+    }
+    result.actual_cpu = sched_getcpu();
+
+    std::printf("[RT] requested policy=%d priority=%d cpu=%d mlock=%s\n",
+                native_policy,
+                requested_priority,
+                config.cpu_id,
+                config.lock_memory ? "on" : "off");
+    std::printf("[RT] actual policy=%d priority=%d cpu=%d "
+                "scheduler=%s affinity=%s mlock=%s\n",
+                result.actual_policy,
+                result.actual_priority,
+                result.actual_cpu,
+                result.scheduler_configured ? "ok" : "failed",
+                result.affinity_configured ? "ok" : "failed",
+                result.memory_locked ? "ok" : "failed");
+
+    return result;
 }
 
 /*
@@ -991,7 +1091,9 @@ int configure(App &app, const std::string &axis_config_directory) {
  * app：主站运行期上下文，提供 master/domain/process data。
  * keep_running：信号处理函数会置 0，循环据此退出。
  */
-void run(App &app, volatile std::sig_atomic_t &keep_running) {
+void run(App &app,
+         volatile std::sig_atomic_t &keep_running,
+         const RunConfig &config) {
     /* wakeup：下一次周期唤醒的绝对时间。 */
     timespec wakeup {};
 
@@ -1002,12 +1104,22 @@ void run(App &app, volatile std::sig_atomic_t &keep_running) {
     std::printf("starting 1 ms SINSUN EtherCAT communication loop\n");
     std::printf("topology: servo id 1-6, endio id 7, DC assign=0x%04X\n",
                 kDcAssignActivate);
-    std::printf("motion: only Servo 6 enabled, amplitude=%d pulse, "
-                "peak_to_peak=%d pulse, period=%llu ms ramp=%llu ms\n",
-                kMotionAmplitudeCounts,
-                kMotionRangeCounts,
-                static_cast<unsigned long long>(kMotionPeriodCycles),
-                static_cast<unsigned long long>(kMotionRampCycles));
+    if (config.enable_motion) {
+        std::printf("motion: only Servo 6 enabled, amplitude=%d pulse, "
+                    "peak_to_peak=%d pulse, period=%llu ms ramp=%llu ms\n",
+                    kMotionAmplitudeCounts,
+                    kMotionRangeCounts,
+                    static_cast<unsigned long long>(kMotionPeriodCycles),
+                    static_cast<unsigned long long>(kMotionRampCycles));
+    } else {
+        std::printf("motion: disabled; all RxPDO outputs remain zero\n");
+    }
+    std::printf("test options: max_cycles=%llu dc_sync_period=%llu "
+                "report_period=%llu\n",
+                static_cast<unsigned long long>(config.max_cycles),
+                static_cast<unsigned long long>(
+                    config.dc_sync_period_cycles),
+                static_cast<unsigned long long>(config.report_period_cycles));
 
     /* cycle：1 ms 通讯周期计数，用于控制打印和 DC 同步节拍。 */
     uint64_t cycle = 0;
@@ -1037,15 +1149,24 @@ void run(App &app, volatile std::sig_atomic_t &keep_running) {
 
         update_dc_monitor(app, quality_stats, cycle);
 
-        /* 控制 PDO 必须每个 1 ms 周期刷新；quality_stats.active 只用于统计。 */
-        write_cycle_outputs(app, motion_control);
+        if (config.enable_motion) {
+            /* 正式控制模式按原逻辑刷新 Servo 6 的控制输出。 */
+            write_cycle_outputs(app, motion_control);
+        } else {
+            /* 被动测试模式每周期保持全部输出为 0，防止意外使能或运动。 */
+            write_default_outputs(app);
+        }
 
-        if (cycle > 0 && quality_stats.active && quality_stats.cycles > 0 &&
-            quality_stats.cycles % kQualityReportPeriodCycles == 0) {
+        if (config.report_period_cycles > 0 &&
+            cycle > 0 &&
+            quality_stats.active &&
+            quality_stats.cycles > 0 &&
+            quality_stats.cycles % config.report_period_cycles == 0) {
             print_quality_report(app, quality_stats, false);
         }
 
-        if (cycle % kDcSyncPeriodCycles == 0) {
+        if (config.dc_sync_period_cycles > 0 &&
+            cycle % config.dc_sync_period_cycles == 0) {
             ecrt_master_sync_reference_clock(app.master);
             ecrt_master_sync_slave_clocks(app.master);
         }
@@ -1055,6 +1176,10 @@ void run(App &app, volatile std::sig_atomic_t &keep_running) {
         ecrt_domain_queue(app.domain);
         ecrt_master_send(app.master);
         ++cycle;
+
+        if (config.max_cycles > 0 && cycle >= config.max_cycles) {
+            keep_running = 0;
+        }
     }
 
     print_quality_report(app, quality_stats, true);
