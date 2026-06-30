@@ -169,9 +169,10 @@ void print_usage(const char *program_name) {
     std::fprintf(
         stderr,
         "usage: %s AxisXmlDirectory [duration_s] [cpu_id] [policy] "
-        "[priority] [mlock] [dc_sync_cycles] [enable_motion]\n"
+        "[priority] [mlock] [dc_sync_cycles] [enable_motion] "
+        "[require_endio_op]\n"
         "defaults: duration_s=60 cpu_id=-1 policy=fifo priority=-1(max) "
-        "mlock=1 dc_sync_cycles=1 enable_motion=1\n",
+        "mlock=1 dc_sync_cycles=1 enable_motion=1 require_endio_op=1\n",
         program_name);
 }
 
@@ -179,7 +180,7 @@ void print_usage(const char *program_name) {
 
 /* SIASUN 实时通讯、单关节老化运动与资源占用测试入口。 */
 int main(int argc, char *argv[]) {
-    if (argc < 2 || argc > 9) {
+    if (argc < 2 || argc > 10) {
         print_usage(argv[0]);
         return 1;
     }
@@ -203,6 +204,9 @@ int main(int argc, char *argv[]) {
     /* enable_motion：命令行中的 0/1 单关节老化运动开关。 */
     int enable_motion = 1;
 
+    /* require_endio_op：命令行中的 0/1 EndIO 通信质量门槛开关。 */
+    int require_endio_op = 1;
+
     if ((argc > 2 &&
          !parse_uint64(argv[2], "duration_s", duration_seconds)) ||
         (argc > 3 &&
@@ -217,7 +221,9 @@ int main(int argc, char *argv[]) {
                        "dc_sync_cycles",
                        run_config.dc_sync_period_cycles)) ||
         (argc > 8 &&
-         !parse_int(argv[8], "enable_motion", enable_motion))) {
+         !parse_int(argv[8], "enable_motion", enable_motion)) ||
+        (argc > 9 &&
+         !parse_int(argv[9], "require_endio_op", require_endio_op))) {
         print_usage(argv[0]);
         return 1;
     }
@@ -235,9 +241,14 @@ int main(int argc, char *argv[]) {
         std::fprintf(stderr, "enable_motion must be 0 or 1\n");
         return 1;
     }
+    if (require_endio_op != 0 && require_endio_op != 1) {
+        std::fprintf(stderr, "require_endio_op must be 0 or 1\n");
+        return 1;
+    }
 
     realtime_config.lock_memory = lock_memory == 1;
     run_config.enable_motion = enable_motion == 1;
+    run_config.require_endio_for_quality = require_endio_op == 1;
 
     /* duration_nanoseconds：测试时长换算成纳秒。 */
     const uint64_t duration_nanoseconds =
@@ -258,6 +269,10 @@ int main(int argc, char *argv[]) {
                 axis_config_directory.c_str());
     std::printf("[TEST] Servo 6 aging motion: %s\n",
                 run_config.enable_motion ? "enabled" : "disabled");
+    std::printf("[TEST] communication gate: %s\n",
+                run_config.require_endio_for_quality
+                    ? "Servo 1-6 + EndIO 7"
+                    : "Servo 1-6 only; EndIO 7 is optional");
 
     install_signal_handlers();
 

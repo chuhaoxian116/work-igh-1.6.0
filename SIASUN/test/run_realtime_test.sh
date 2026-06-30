@@ -21,6 +21,8 @@ MLOCK="${MLOCK:-1}"
 DC_SYNC_CYCLES="${DC_SYNC_CYCLES:-1}"
 # ENABLE_MOTION：是否执行现有 Servo 6 单关节老化运动。
 ENABLE_MOTION="${ENABLE_MOTION:-1}"
+# REQUIRE_ENDIO_OP：质量统计是否要求 EndIO 进入 OP；0 表示只判断6个伺服。
+REQUIRE_ENDIO_OP="${REQUIRE_ENDIO_OP:-1}"
 # LOAD_PROFILE：压力类型，可选 idle、cpu、memory 或 mixed。
 LOAD_PROFILE="${LOAD_PROFILE:-idle}"
 # TEST_TAG：本轮测试编号，用于区分同一压力类型下的多组结果。
@@ -110,9 +112,10 @@ environment_log="${RESULT_DIR}/environment.log"
     printf 'TEST_TAG=%s\n' "${TEST_TAG}"
     printf 'DURATION_S=%s CPU_ID=%s POLICY=%s PRIORITY=%s MLOCK=%s\n' \
         "${DURATION_S}" "${CPU_ID}" "${POLICY}" "${PRIORITY}" "${MLOCK}"
-    printf 'DC_SYNC_CYCLES=%s ENABLE_MOTION=%s LOAD_PROFILE=%s LOAD_CPUSET=%s\n' \
-        "${DC_SYNC_CYCLES}" "${ENABLE_MOTION}" "${LOAD_PROFILE}" \
-        "${LOAD_CPUSET}"
+    printf 'DC_SYNC_CYCLES=%s ENABLE_MOTION=%s REQUIRE_ENDIO_OP=%s\n' \
+        "${DC_SYNC_CYCLES}" "${ENABLE_MOTION}" "${REQUIRE_ENDIO_OP}"
+    printf 'LOAD_PROFILE=%s LOAD_CPUSET=%s\n' \
+        "${LOAD_PROFILE}" "${LOAD_CPUSET}"
     printf 'CPU_WORKERS=%s CPU_LOAD=%s VM_WORKERS=%s VM_BYTES=%s\n' \
         "${CPU_WORKERS}" "${CPU_LOAD}" "${VM_WORKERS}" "${VM_BYTES}"
     printf '\nloadavg before: '
@@ -128,7 +131,7 @@ start_stress
 # test_command：传给测试程序的完整位置参数。
 test_command=("${TEST_BIN}" "${AXIS_DIR}" "${DURATION_S}" "${CPU_ID}"
     "${POLICY}" "${PRIORITY}" "${MLOCK}" "${DC_SYNC_CYCLES}"
-    "${ENABLE_MOTION}")
+    "${ENABLE_MOTION}" "${REQUIRE_ENDIO_OP}")
 
 printf 'running:'
 printf ' %q' "${test_command[@]}"

@@ -74,6 +74,12 @@ constexpr uint16_t kEndIoLogicalId = 7;
 /* IgH 使用 0-based position，因此逻辑 id 7 对应 position 6。 */
 constexpr uint16_t kEndIoPosition = kEndIoLogicalId - 1;
 
+/*
+ * 当前 PDO 映射中，6 个伺服完整交换过程数据时的 Working Counter。
+ * 临时允许 EndIO 异常的测试模式只使用该值判断6轴通讯是否完整。
+ */
+constexpr uint32_t kServoOnlyExpectedWorkingCounter = 18;
+
 }  // namespace sinsun
 
 #endif

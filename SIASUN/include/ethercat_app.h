@@ -84,6 +84,11 @@ struct RealtimeSetupResult {
 struct RunConfig {
     /* enable_motion：是否执行现有 Servo 6 使能和运动逻辑。 */
     bool enable_motion = true;
+    /*
+     * require_endio_for_quality：通信质量统计是否要求 EndIO 同时进入 OP。
+     * true 保持7站完整判断；false 只把6个伺服作为必需通讯对象。
+     */
+    bool require_endio_for_quality = true;
     /* max_cycles：达到该周期数后退出；0 表示只由信号控制退出。 */
     uint64_t max_cycles = 0;
     /* dc_sync_period_cycles：DC 同步间隔；0 表示不主动发送同步请求。 */

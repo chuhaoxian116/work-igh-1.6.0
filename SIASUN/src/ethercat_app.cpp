@@ -146,6 +146,8 @@ struct ServoMotionControl {
 struct QualityStats {
     bool active = false;
     bool dc_monitor_armed = false;
+    bool require_endio = true;
+    uint32_t expected_working_counter = 0;
 
     uint64_t cycles = 0;
     uint64_t interval_samples = 0;
@@ -614,7 +616,13 @@ void write_default_outputs(App &app) {
 }
 
 
-bool all_slaves_operational(App &app) {
+/*
+ * 检查本次质量统计要求的从站是否全部进入 OP。
+ *
+ * app：主站运行期上下文。
+ * require_endio：true 要求6个伺服和 EndIO；false 只要求6个伺服。
+ */
+bool required_slaves_operational(App &app, bool require_endio) {
     for (size_t i = 0; i < kServoCount; ++i) {
         ec_slave_config_state_t state {};
         if (ecrt_slave_config_state(app.servo_configs[i], &state) != 0) {
@@ -623,6 +631,10 @@ bool all_slaves_operational(App &app) {
         if (!state.online || !state.operational || state.al_state != 0x08) {
             return false;
         }
+    }
+
+    if (!require_endio) {
+        return true;
     }
 
     ec_slave_config_state_t endio_state {};
@@ -681,16 +693,23 @@ void quality_update_domain(QualityStats &stats,
         stats.max_working_counter = domain_state->working_counter;
     }
 
-    switch (domain_state->wc_state) {
-    case EC_WC_COMPLETE:
+    /*
+     * 完整7站模式沿用 IgH 的 EC_WC_COMPLETE 判断。
+     * 6轴临时模式保留同一个 domain，只要求 WC 达到6个伺服的贡献值；
+     * EndIO 即使缺失或未进入 OP，也不会阻塞6轴通讯统计。
+     */
+    const bool required_communication_complete =
+        stats.require_endio
+            ? domain_state->wc_state == EC_WC_COMPLETE
+            : domain_state->working_counter >=
+                  stats.expected_working_counter;
+
+    if (required_communication_complete) {
         ++stats.domain_complete_cycles;
-        break;
-    case EC_WC_INCOMPLETE:
+    } else if (domain_state->wc_state == EC_WC_INCOMPLETE) {
         ++stats.domain_incomplete_cycles;
-        break;
-    default:
+    } else {
         ++stats.domain_zero_cycles;
-        break;
     }
 }
 
@@ -699,12 +718,19 @@ bool quality_update_after_op(App &app,
                              int64_t now_ns,
                              const ec_domain_state_t *domain_state) {
     if (!stats.active) {
-        if (!all_slaves_operational(app)) {
+        if (!required_slaves_operational(app, stats.require_endio)) {
             return false;
         }
 
         stats.active = true;
-        std::printf("通信质量统计开始：7 个从站已全部进入 OP，启动阶段数据不计入统计。\n");
+        if (stats.require_endio) {
+            std::printf("通信质量统计开始：7 个从站已全部进入 OP，"
+                        "启动阶段数据不计入统计。\n");
+        } else {
+            std::printf("通信质量统计开始：6 个伺服已全部进入 OP，"
+                        "EndIO 不参与通过判定，期望 WC>=%u。\n",
+                        stats.expected_working_counter);
+        }
     }
 
     quality_update_cycle(stats, now_ns);
@@ -798,7 +824,13 @@ void print_quality_report(App &app,
 
     if (!stats.active) {
         std::printf("[统计状态]\n");
-        std::printf("  7 个从站尚未全部进入 OP，本次没有有效运行期通信样本。\n");
+        if (stats.require_endio) {
+            std::printf("  7 个从站尚未全部进入 OP，"
+                        "本次没有有效运行期通信样本。\n");
+        } else {
+            std::printf("  6 个伺服尚未全部进入 OP，"
+                        "本次没有有效运行期通信样本。\n");
+        }
         std::printf("  INIT / PRE-OP / SAFE-OP 启动阶段数据均未计入。\n");
         std::printf("============================================================\n");
         return;
@@ -824,6 +856,12 @@ void print_quality_report(App &app,
 
     /* Domain 的 WC 状态用于衡量本周期过程数据是否完整交换。 */
     std::printf("[Domain 过程数据质量]\n");
+    std::printf("  判定对象          : %12s\n",
+                stats.require_endio ? "6 Servo + EndIO" : "6 Servo only");
+    if (!stats.require_endio) {
+        std::printf("  通过判定 WC       :          >=%u\n",
+                    stats.expected_working_counter);
+    }
     std::printf("  完整周期          : %12llu\n",
                 static_cast<unsigned long long>(stats.domain_complete_cycles));
     std::printf("  不完整周期        : %12llu\n",
@@ -1140,6 +1178,10 @@ void run(App &app,
 
     /* quality_stats：累计保存 OP 之后的周期、WC 和 DC 质量统计。 */
     QualityStats quality_stats {};
+    quality_stats.require_endio = config.require_endio_for_quality;
+    quality_stats.expected_working_counter =
+        config.require_endio_for_quality ? 0 :
+                                           kServoOnlyExpectedWorkingCounter;
 
     std::printf("starting 1 ms SINSUN EtherCAT communication loop\n");
     std::printf("topology: servo id 1-6, endio id 7, DC assign=0x%04X\n",
@@ -1155,11 +1197,12 @@ void run(App &app,
         std::printf("motion: disabled; all RxPDO outputs remain zero\n");
     }
     std::printf("test options: max_cycles=%llu dc_sync_period=%llu "
-                "report_period=%llu\n",
+                "report_period=%llu require_endio_op=%u\n",
                 static_cast<unsigned long long>(config.max_cycles),
                 static_cast<unsigned long long>(
                     config.dc_sync_period_cycles),
-                static_cast<unsigned long long>(config.report_period_cycles));
+                static_cast<unsigned long long>(config.report_period_cycles),
+                config.require_endio_for_quality ? 1U : 0U);
 
     /* cycle：1 ms 通讯周期计数，用于控制打印和 DC 同步节拍。 */
     uint64_t cycle = 0;
@@ -1218,8 +1261,8 @@ void run(App &app,
         print_state_changes(app);
 
         /*
-         * 只有 6 个伺服和 EndIO 全部进入 OP 后才开始累计质量数据，避免
-         * 把 PRE-OP/SAFE-OP 启动阶段计入稳态通信结果。
+         * 默认只有6个伺服和 EndIO 全部进入 OP 后才累计质量数据。
+         * 临时6轴模式只要求6个伺服进入 OP，EndIO 状态仍照常读取和打印。
          */
         quality_update_after_op(app, quality_stats, monotonic_raw_ns(),
                                 domain_state_ptr);

@@ -16,13 +16,13 @@ cmake -S . -B build
 cmake --build build
 
 sudo ./build/SIASUN/test/siasun_realtime_communication_test \
-    ./doc/SIASUN/gcr10_1300 60 2 fifo -1 1 1 1
+    ./doc/SIASUN/gcr10_1300 60 2 fifo -1 1 1 1 1
 ```
 
 位置参数依次为：
 
 ```text
-AxisXmlDirectory duration_s cpu_id policy priority mlock dc_sync_cycles enable_motion
+AxisXmlDirectory duration_s cpu_id policy priority mlock dc_sync_cycles enable_motion require_endio_op
 ```
 
 - `cpu_id=-1`：不设置 CPU 亲和性。
@@ -31,9 +31,27 @@ AxisXmlDirectory duration_s cpu_id policy priority mlock dc_sync_cycles enable_m
 - `mlock=1|0`：开启或关闭内存锁定。
 - `dc_sync_cycles=1`：每个 1 ms 周期发送一次 DC 同步请求。
 - `enable_motion=1|0`：开启或关闭现有 Servo 6 单关节老化运动。
+- `require_endio_op=1|0`：`1` 要求7站全部 OP；`0` 只使用6个伺服
+  的 OP 状态和 `WC>=18` 判断通信通过。
 
 实时设置需要 root 或相应的 `CAP_SYS_NICE`、`CAP_IPC_LOCK` 能力。必须检查
 日志中的 `[RT] actual`，不能只根据命令行认定实时设置已经生效。
+
+## EndIO 临时异常模式
+
+默认 `REQUIRE_ENDIO_OP=1`，保持6个伺服和 EndIO 共7站的完整判断。现场
+EndIO 临时异常、只测试6个关节通讯时设置：
+
+```sh
+sudo env TEST_TAG=T-SERVO6 TEST_BIN="$TEST_BIN" AXIS_DIR="$AXIS_DIR" \
+    DURATION_S=1800 CPU_ID=2 POLICY=fifo PRIORITY=-1 MLOCK=1 \
+    DC_SYNC_CYCLES=1 ENABLE_MOTION=1 REQUIRE_ENDIO_OP=0 \
+    LOAD_PROFILE=idle ./run_realtime_test.sh
+```
+
+该开关只改变质量统计的启动条件和 WC 通过门槛。EndIO 的主站配置、PDO、
+状态读取和日志保持不变；报告中会显示 `6 Servo only` 和通过门槛
+`WC>=18`。恢复 EndIO 后应改回 `REQUIRE_ENDIO_OP=1`。
 
 ## 运动配置
 
@@ -105,7 +123,8 @@ sudo env \
     TEST_BIN=../../build/SIASUN/test/siasun_realtime_communication_test \
     AXIS_DIR=../../doc/SIASUN/gcr10_1300 \
     DURATION_S=600 CPU_ID=2 POLICY=fifo PRIORITY=-1 MLOCK=1 \
-    DC_SYNC_CYCLES=1 ENABLE_MOTION=1 LOAD_PROFILE=mixed LOAD_CPUSET=1,5 \
+    DC_SYNC_CYCLES=1 ENABLE_MOTION=1 REQUIRE_ENDIO_OP=1 \
+    LOAD_PROFILE=mixed LOAD_CPUSET=1,5 \
     CPU_WORKERS=2 CPU_LOAD=100 VM_WORKERS=1 VM_BYTES=8G \
     ./run_realtime_test.sh
 ```
