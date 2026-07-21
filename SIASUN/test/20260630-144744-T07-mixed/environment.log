@@ -1,0 +1,51 @@
+date: 2026-06-30T14:47:44+08:00
+Linux ubuntu 5.15.148-rt74 #1 SMP PREEMPT_RT Fri Mar 27 18:01:01 CST 2026 x86_64 x86_64 x86_64 GNU/Linux
+
+cmdline: BOOT_IMAGE=/boot/vmlinuz-5.15.148-rt74 root=UUID=bef05322-e03c-4b7a-a6f5-f37580a62d1d ro quiet splash vt.handoff=7
+
+
+cpu online: 0-7
+
+realtime kernel flag: 1
+
+
+EtherCAT related IRQs:
+ 131:          0          9          0          0          0          0          0          0  IR-PCI-MSI 1048576-edge      enp2s0
+ 132:          0          0          0          6          0          0          0      45273  IR-PCI-MSI 1048577-edge      enp2s0-TxRx-0
+ 133:          0          0     209478          0          6          0          0          0  IR-PCI-MSI 1048578-edge      enp2s0-TxRx-1
+ 134:          0          0          0          0        115      76715          0        137  IR-PCI-MSI 1048579-edge      enp2s0-TxRx-2
+ 135:     105686          0          0          0          0          0          6          0  IR-PCI-MSI 1048580-edge      enp2s0-TxRx-3
+
+settings:
+TEST_TAG=T07
+DURATION_S=1800 CPU_ID=2 POLICY=fifo PRIORITY=-1 MLOCK=1
+DC_SYNC_CYCLES=1 ENABLE_MOTION=1 LOAD_PROFILE=mixed LOAD_CPUSET=1,5
+CPU_WORKERS=2 CPU_LOAD=100 VM_WORKERS=1 VM_BYTES=8G
+
+loadavg before: 0.44 0.96 1.04 2/511 103610
+
+memory before:
+MemTotal:       32642520 kB
+MemAvailable:   31467852 kB
+SwapTotal:       2097148 kB
+SwapFree:        2097148 kB
+
+pressure before:
+/proc/pressure/cpu:some avg10=0.49 avg60=0.39 avg300=0.12 total=116772813
+/proc/pressure/cpu:full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+/proc/pressure/memory:some avg10=0.00 avg60=0.00 avg300=0.00 total=0
+/proc/pressure/memory:full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+
+loadavg after: 3.29 3.36 3.04 1/511 114472
+
+memory after:
+MemTotal:       32642520 kB
+MemAvailable:   31459496 kB
+SwapTotal:       2097148 kB
+SwapFree:        2097148 kB
+
+pressure after:
+/proc/pressure/cpu:some avg10=48.00 avg60=48.00 avg300=47.93 total=988382645
+/proc/pressure/cpu:full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+/proc/pressure/memory:some avg10=0.00 avg60=0.00 avg300=0.00 total=0
+/proc/pressure/memory:full avg10=0.00 avg60=0.00 avg300=0.00 total=0
