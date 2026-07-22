@@ -38,7 +38,7 @@ myproject/
 ├── doc/
 │   ├── GSD620/
 │   └── SIASUN/gcr10_1300/Axis1.xml ... Axis6.xml
-└── thirdparty/
+└── third_party/
     ├── ethercat/
     └── tinyxml2/
         ├── tinyxml2.h
@@ -67,7 +67,7 @@ build/SIASUN/test/siasun_realtime_communication_test
 工程默认使用随工程携带的 IgH EtherCAT 安装目录：
 
 ```cmake
-thirdparty/ethercat
+third_party/ethercat
 ```
 
 如果现场路径不同，可以配置时覆盖：
@@ -178,9 +178,9 @@ SIASUN 使用 `tinyxml2` 读取 `Axis*.xml`。
 当前工程只保留 tinyxml2 的最小可用文件：
 
 ```text
-thirdparty/tinyxml2/tinyxml2.h
-thirdparty/tinyxml2/tinyxml2.cpp
-thirdparty/tinyxml2/LICENSE.txt
+third_party/tinyxml2/tinyxml2.h
+third_party/tinyxml2/tinyxml2.cpp
+third_party/tinyxml2/LICENSE.txt
 ```
 
 `SIASUN/CMakeLists.txt` 直接把 `tinyxml2.cpp` 编译进 `igh_master_sinsun`，不依赖系统安装包。

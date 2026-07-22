@@ -2,7 +2,7 @@ add_library(siasun_core STATIC
     src/axis_config.cpp
     src/ethercat_app.cpp
     src/sdo_parameter.cpp
-    ../thirdparty/tinyxml2/tinyxml2.cpp
+    ../third_party/tinyxml2/tinyxml2.cpp
 )
 
 target_include_directories(siasun_core
@@ -10,11 +10,14 @@ target_include_directories(siasun_core
     include
     "${ETHERCAT_INCLUDE_DIR}"
     PRIVATE
-    ../thirdparty/tinyxml2
+    ../third_party/tinyxml2
 )
 
 target_link_libraries(siasun_core PUBLIC
     "${ETHERCAT_LIBRARY}"
+    robot_runtime::robot_runtime
+    cia402::cia402
+    robot_interface::robot_interface
     pthread
     m
     rt
@@ -40,6 +43,8 @@ target_link_libraries(igh_master_sinsun PRIVATE
 
 target_link_options(igh_master_sinsun PRIVATE
     "-Wl,-rpath,${ETHERCAT_LIBRARY_DIR}"
+    "-Wl,-rpath,${ROBOT_RUNTIME_LIBRARY_DIR}"
+    "-Wl,-rpath,${CIA402_LIBRARY_DIR}"
 )
 
 target_compile_options(igh_master_sinsun PRIVATE
