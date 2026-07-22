@@ -72,5 +72,6 @@ set_target_properties(robot_runtime::robot_runtime PROPERTIES
     INTERFACE_LINK_LIBRARIES
         "cia402::cia402;robot_interface::robot_interface")
 
+add_subdirectory(src)
 add_subdirectory(GSD620)
 add_subdirectory(SIASUN)
