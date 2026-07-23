@@ -5,6 +5,7 @@
 namespace master {
 
 void NativeMasterDeleter::operator()(ec_master_t *master) const noexcept {
+    // ecrt_release_master() 会同时释放该 master 创建的 domain 和从站配置。
     if (master) {
         ecrt_release_master(master);
     }
@@ -47,6 +48,7 @@ MasterResult IghMaster::Configure() {
         return MasterResult::InvalidState;
     }
 
+    // 从此处开始取得 IgH 资源；后续任何失败路径统一由 Release() 回收。
     master_.reset(ecrt_request_master(master_index_));
     if (!master_) {
         return MasterResult::Error;
@@ -58,6 +60,7 @@ MasterResult IghMaster::Configure() {
         return MasterResult::Error;
     }
 
+    // 所有从站共享同一个 master、单个 PDO domain 和标称通信周期。
     const device::DeviceConfiguration configuration{
         master_.get(), domain_, cycle_time_ns_};
     for (const std::unique_ptr<device::IghDevice> &device : devices_) {
@@ -67,6 +70,7 @@ MasterResult IghMaster::Configure() {
         }
     }
 
+    // 参考时钟必须在主站激活前选择。
     if (reference_clock_device_ &&
         (!reference_clock_device_->slave_config() ||
              ecrt_master_select_reference_clock(
@@ -88,6 +92,7 @@ MasterResult IghMaster::Activate() {
         return MasterResult::Error;
     }
 
+    // 只有激活成功后 domain process data 的基地址才有效。
     domain_pd_ = ecrt_domain_data(domain_);
     if (!domain_pd_) {
         Release();
@@ -103,6 +108,7 @@ MasterResult IghMaster::ReceiveAndProcess(uint64_t application_time_ns) {
         return MasterResult::InvalidState;
     }
 
+    // 收帧后先处理 domain，再让每个设备从 TxPDO 区域读取输入数据。
     ecrt_master_application_time(master_.get(), application_time_ns);
     ecrt_master_receive(master_.get());
     ecrt_domain_process(domain_);
@@ -118,6 +124,7 @@ MasterResult IghMaster::QueueAndSend(bool synchronize_dc) {
         return MasterResult::InvalidState;
     }
 
+    // 先由设备写入 RxPDO，再将整个 domain 排队并发送。
     for (const std::unique_ptr<device::IghDevice> &device : devices_) {
         device->WriteProcessData(domain_pd_);
     }
@@ -132,6 +139,7 @@ MasterResult IghMaster::QueueAndSend(bool synchronize_dc) {
 }
 
 void IghMaster::Release() {
+    // 设备先清除保存的 IgH 句柄和 PDO offset，避免保留已失效的地址。
     for (const std::unique_ptr<device::IghDevice> &device : devices_) {
         device->Reset();
     }

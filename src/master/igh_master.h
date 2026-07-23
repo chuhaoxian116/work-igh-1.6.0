@@ -18,14 +18,19 @@ enum class MasterState : uint8_t {
 
 /** @brief 主站接口调用结果。 */
 enum class MasterResult : uint8_t {
-    Success = 0,
-    InvalidState = 1,
-    InvalidArgument = 2,
-    Error = 3,
+    Success = 0,         // 本次调用成功。
+    InvalidState = 1,    // 当前主站生命周期状态不允许调用。
+    InvalidArgument = 2, // 参数为空、重复或不属于当前主站。
+    Error = 3,           // IgH 底层调用或设备适配器配置失败。
 };
 
 /** @brief 由 IghMaster 独占管理的 IgH master 句柄删除器。 */
 struct NativeMasterDeleter {
+    /**
+     * @brief 调用 IgH API 释放已请求的 master 句柄。
+     *
+     * @param master 需要释放的 IgH master 句柄；允许为 nullptr。
+     */
     void operator()(ec_master_t *master) const noexcept;
 };
 
@@ -42,64 +47,147 @@ struct NativeMasterDeleter {
  */
 class IghMaster {
 public:
-    IghMaster(uint32_t master_index, uint32_t cycle_time_ns);
-    ~IghMaster();
+  /**
+   * @brief 创建尚未请求 IgH master 的主站管理对象。
+   *
+   * 构造阶段不访问 EtherCAT 总线；实际 master 请求发生在 Configure()。
+   *
+   * @param master_index 需要请求的 IgH master 编号。
+   * @param cycle_time_ns 主站标称周期，单位为纳秒。
+   */
+  IghMaster(uint32_t master_index, uint32_t cycle_time_ns);
 
-    IghMaster(const IghMaster &) = delete;
-    IghMaster &operator=(const IghMaster &) = delete;
+  /**
+   * @brief 自动释放 IgH master，并重置所有已注册设备。
+   */
+  ~IghMaster();
+
+  IghMaster(const IghMaster &) = delete;
+  IghMaster &operator=(const IghMaster &) = delete;
+
+  /**
+   * @brief 在 Configure() 前注册并接管一个设备适配器。
+   *
+   * 仅在返回 Success 时所有权转移给 IghMaster；失败时 device 保持由
+   * 调用方持有，调用方可自行处理或复用它。
+   *
+   * @param device 待注册的从站适配器智能指针。
+   * @return Success 主站已接管从站对象。
+   * @return InvalidState 主站已经配置或激活，不能新增从站。
+   * @return InvalidArgument device 为空或该对象已被注册。
+   */
+  MasterResult AddDevice(std::unique_ptr<device::IghDevice> &device);
+
+  /**
+   * @brief 指定一个已注册从站作为 EtherCAT DC 参考时钟。
+   *
+   * 必须在 Configure() 前调用；未调用时仍可配置主站，但不会显式选择
+   * DC 参考时钟。
+   *
+   * @param device 已由当前主站注册的从站对象。
+   * @return Success 已设置 DC 参考时钟。
+   * @return InvalidState 主站已经配置或激活。
+   * @return InvalidArgument device 不属于当前主站。
+   */
+  MasterResult SetReferenceClockDevice(const device::IghDevice &device);
+
+  /**
+   * @brief 请求 IgH master，创建 PDO domain，并配置所有已注册从站。
+   *
+   * 本函数依次调用每个 IghDevice::Configure()，并在设置了参考设备时
+   * 选择其为 DC 参考时钟。任一步失败都会释放已请求的 IgH 资源。
+   *
+   * @return Success 主站和所有从站配置完成，状态进入 Configured。
+   * @return InvalidState 主站不是 Initial 状态，或尚未注册任何从站。
+   * @return Error 请求 IgH master、创建 domain 或从站配置失败。
+   */
+  MasterResult Configure();
+
+  /**
+   * @brief 激活 IgH master 并取得 domain process data 基地址。
+   *
+   * 成功后才允许进入实时周期；激活失败时会释放 IgH 资源并重置设备。
+   *
+   * @return Success 主站状态进入 Active。
+   * @return InvalidState 主站尚未完成 Configure()。
+   * @return Error 激活 master 或取得 domain 数据基地址失败。
+   */
+  MasterResult Activate();
+
+  /**
+   * @brief 接收 EtherCAT 帧、处理 domain，并更新所有设备输入 PDO。
+   *
+   * application_time_ns 由实时调度层提供。若不使用 DC，可传 0。
+   *
+   * @param application_time_ns 当前周期的单调时间，单位为纳秒。
+   * @return Success 已完成帧接收、domain 处理和全部设备输入 PDO 映射。
+   * @return InvalidState 主站未处于 Active 状态。
+   */
+  MasterResult ReceiveAndProcess(uint64_t application_time_ns);
+
+  /**
+   * @brief 写入所有设备输出 PDO，并排队发送本周期 EtherCAT 帧。
+   *
+   * synchronize_dc 为 true 时，在 domain queue 前排队参考时钟和从站
+   * 时钟同步报文；调用频率由上层周期逻辑决定。
+   *
+   * @param synchronize_dc 是否在本周期同步参考时钟与从站时钟。
+   * @return Success 已完成全部设备输出 PDO 映射并发送帧。
+   * @return InvalidState 主站未处于 Active 状态。
+   */
+  MasterResult QueueAndSend(bool synchronize_dc);
+
+  /**
+   * @brief 重置设备并释放 IgH master 及其关联 domain 资源。
+   *
+   * 此函数可重复调用；已注册的设备对象仍由 IghMaster 保留，因此可在
+   * 后续再次调用 Configure() 重新建立通信。
+   */
+  void Release();
+
+  /**
+   * @brief 获取当前主站生命周期状态。
+   *
+   * @return 当前主站状态。
+   */
+  MasterState state() const {
+      return state_;
+  }
 
     /**
-     * @brief 在 Configure() 前注册并接管一个设备适配器。
+     * @brief 获取 IgH 原生 master 观察指针。
      *
-     * 仅在返回 Success 时所有权转移给 IghMaster；失败时 device 保持由
-     * 调用方持有，调用方可自行处理或复用它。
-     */
-    MasterResult AddDevice(std::unique_ptr<device::IghDevice> &device);
-
-    /** @brief 指定已注册设备作为 EtherCAT DC 参考时钟。 */
-    MasterResult SetReferenceClockDevice(const device::IghDevice &device);
-
-    /** @brief 请求 IgH master，创建 domain，并调用所有设备 Configure()。 */
-    MasterResult Configure();
-
-    /** @brief 激活 master 并取得 domain process data 基地址。 */
-    MasterResult Activate();
-
-    /**
-     * @brief 接收 EtherCAT 帧、处理 domain，并更新所有设备输入 PDO。
+     * 调用方不得释放该指针，也不应绕过 IghMaster 直接执行周期调用。
      *
-     * application_time_ns 由实时调度层提供。若不使用 DC，可传 0。
+     * @return 当前 IgH master 句柄；未配置时为 nullptr。
      */
-    MasterResult ReceiveAndProcess(uint64_t application_time_ns);
-
-    /**
-     * @brief 写入所有设备输出 PDO，并排队发送本周期 EtherCAT 帧。
-     *
-     * synchronize_dc 为 true 时，在 domain queue 前排队参考时钟和从站
-     * 时钟同步报文；调用频率由上层周期逻辑决定。
-     */
-    MasterResult QueueAndSend(bool synchronize_dc);
-
-    /** @brief 释放 IgH master 及其 domain 资源；可重复调用。 */
-    void Release();
-
-    MasterState state() const { return state_; }
     ec_master_t *native_master() const { return master_.get(); }
+
+    /**
+     * @brief 获取 IgH 原生 PDO domain 观察指针。
+     *
+     * @return 当前 domain 句柄；Configure() 前或 Release() 后为 nullptr。
+     */
     ec_domain_t *native_domain() const { return domain_; }
 
 private:
-    bool ContainsDevice(const device::IghDevice &device) const;
+  /**
+   * @brief 判断指定从站对象是否已由当前主站注册。
+   *
+   * @param device 待查询的从站对象。
+   * @return true device 已存在于设备列表。
+   * @return false device 不属于当前主站。
+   */
+  bool ContainsDevice(const device::IghDevice &device) const;
 
-    uint32_t master_index_ = 0;
-    uint32_t cycle_time_ns_ = 0;
-    MasterState state_ = MasterState::Initial;
-
-    std::unique_ptr<ec_master_t, NativeMasterDeleter> master_;
-    ec_domain_t *domain_ = nullptr;
-    uint8_t *domain_pd_ = nullptr;
-
-    const device::IghDevice *reference_clock_device_ = nullptr;
-    std::vector<std::unique_ptr<device::IghDevice>> devices_;
+  uint32_t master_index_ = 0;                                 // 需要请求的 IgH master 编号。
+  uint32_t cycle_time_ns_ = 0;                                // 设备配置使用的标称周期，单位为纳秒。
+  MasterState state_ = MasterState::Initial;                  // 当前主站生命周期状态。
+  std::unique_ptr<ec_master_t, NativeMasterDeleter> master_;  // 独占的 IgH master 句柄。
+  ec_domain_t *domain_ = nullptr;                             // 由 master_ 管理的唯一 PDO domain。
+  uint8_t *domain_pd_ = nullptr;                              // 激活后取得的 domain process data 基地址。
+  const device::IghDevice *reference_clock_device_ = nullptr; // devices_ 中被选为 DC 参考时钟的观察指针。
+  std::vector<std::unique_ptr<device::IghDevice>> devices_;   // 主站独占管理的从站适配器列表。
 };
 
 }  // namespace master
