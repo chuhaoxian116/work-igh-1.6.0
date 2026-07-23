@@ -1,6 +1,7 @@
 #ifndef IGH_ORCHESTRATOR_ROBOT_ETHERCAT_ORCHESTRATOR_H
 #define IGH_ORCHESTRATOR_ROBOT_ETHERCAT_ORCHESTRATOR_H
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -23,6 +24,16 @@ enum class OrchestratorResult : uint8_t {
   Success = 0,      // 本次调用成功。
   InvalidState = 1, // 当前生命周期状态不允许调用。
   MasterError = 2,  // IghMaster 的配置、激活或周期调用失败。
+};
+
+/** @brief 供非实时线程读取的 GSD620 反馈快照。 */
+struct Gsd620FeedbackSnapshot {
+  int32_t actual_position = 0;      // 0x6064:00 实际位置。
+  int32_t actual_velocity = 0;      // 0x606C:00 实际速度。
+  int16_t actual_torque = 0;        // 0x6077:00 实际转矩。
+  uint16_t error_code = 0;          // 0x603F:00 错误码。
+  uint16_t statusword = 0;          // 0x6041:00 状态字。
+  int8_t mode_display = 0;          // 0x6061:00 实际运行模式。
 };
 
 /**
@@ -108,10 +119,34 @@ public:
    */
   const master::IghMaster *master() const { return master_.get(); }
 
+  /**
+   * @brief 无锁读取周期线程发布的最新 GSD620 反馈快照。
+   *
+   * 本函数可由主线程或诊断线程调用；读取过程不会访问正在被周期线程修改
+   * 的 Gsd620CyclicData，而是通过序列锁风格的原子快照取得一致数据。
+   *
+   * @param snapshot 用于接收反馈数据的输出对象。
+   * @return true 取得了一份一致的反馈快照。
+   * @return false 主站未初始化或读取期间快照持续更新。
+   */
+  bool ReadGsd620Feedback(Gsd620FeedbackSnapshot &snapshot) const noexcept;
+
 private:
+  /** @brief 将当前周期读取到的 GSD620 数据发布为非实时诊断快照。 */
+  void PublishGsd620Feedback() noexcept;
+
   RobotEthercatConfiguration configuration_{}; // 构造时确定的主站和从站配置。
   std::unique_ptr<master::IghMaster> master_;  // 编排层独占的通用 IgH 主站。
   device::Gsd620Device *gsd620_device_ = nullptr; // 由 IghMaster 独占的从站观察指针。
+
+  std::atomic<uint64_t> feedback_sequence_{0}; // 奇数表示周期线程正在更新反馈快照。
+  std::atomic_bool feedback_valid_{false};     // 至少完成一次有效 PDO 读取后置为 true。
+  std::atomic<int32_t> actual_position_{0};    // 已发布的实际位置。
+  std::atomic<int32_t> actual_velocity_{0};    // 已发布的实际速度。
+  std::atomic<int16_t> actual_torque_{0};      // 已发布的实际转矩。
+  std::atomic<uint16_t> error_code_{0};        // 已发布的驱动错误码。
+  std::atomic<uint16_t> statusword_{0};        // 已发布的状态字。
+  std::atomic<int8_t> mode_display_{0};        // 已发布的实际运行模式。
 };
 
 } // namespace orchestrator

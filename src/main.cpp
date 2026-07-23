@@ -132,6 +132,20 @@ void LockProcessMemory() {
   }
 }
 
+/**
+ * @brief 打印主线程获取到的一次 GSD620 反馈快照。
+ *
+ * @param feedback 由 RobotEthercatOrchestrator 发布的一致反馈快照。
+ */
+void PrintGsd620Feedback(
+    const orchestrator::Gsd620FeedbackSnapshot &feedback) {
+  std::printf(
+      "GSD620: pos=%d vel=%d torque=%d status=0x%04X mode=%d error=0x%04X\n",
+      feedback.actual_position, feedback.actual_velocity,
+      feedback.actual_torque, feedback.statusword, feedback.mode_display,
+      feedback.error_code);
+}
+
 } // namespace
 
 /**
@@ -152,6 +166,15 @@ int main() {
     return 1;
   }
 
+  device::Gsd620Device *const gsd620 = application.gsd620_device();
+  if (!gsd620) {
+    std::fprintf(stderr, "GSD620 device is not available after initialization\n");
+    application.Shutdown();
+    return 1;
+  }
+  gsd620->cyclic_data().axis.outData.mode =
+      static_cast<int8_t>(cia402::AxisMode::kCyclicSynchronousPosition);
+
   LockProcessMemory();
 
   std::atomic_bool keep_running{true}; // 主线程和周期线程共享的运行状态。
@@ -160,10 +183,20 @@ int main() {
                            configuration.cycle_time_ns,
                            std::ref(keep_running), std::ref(cycle_failed));
 
+  auto next_feedback_report = std::chrono::steady_clock::now();
   while (keep_running.load()) {
     if (g_stop_requested != 0) {
       keep_running.store(false);
       break;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next_feedback_report) {
+      orchestrator::Gsd620FeedbackSnapshot feedback{};
+      if (application.ReadGsd620Feedback(feedback)) {
+        PrintGsd620Feedback(feedback);
+      }
+      next_feedback_report = now + std::chrono::seconds(1);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
