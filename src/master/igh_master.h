@@ -2,6 +2,7 @@
 #define IGH_MASTER_IGH_MASTER_H
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "device/igh_device.h"
@@ -23,14 +24,21 @@ enum class MasterResult : uint8_t {
     Error = 3,
 };
 
+/** @brief 由 IghMaster 独占管理的 IgH master 句柄删除器。 */
+struct NativeMasterDeleter {
+    void operator()(ec_master_t *master) const noexcept;
+};
+
 /**
  * @brief 单 Domain 的通用 IgH EtherCAT 主站。
  *
  * 调用顺序：AddDevice() -> SetReferenceClockDevice() -> Configure() ->
- * Activate()。实时周期中由应用线程调用 ReceiveAndProcess()，在算法和
- * RobotRuntime 更新完成后调用 QueueAndSend()。
+ * Activate()。实时周期中由业务编排层调用 ReceiveAndProcess()，在完成
+ * 本周期业务更新后调用 QueueAndSend()。
  *
- * 此类不创建实时线程、不 sleep、不调用算法，也不包含具体设备 PDO。
+ * 此类独占所有 IghDevice 对象，并负责它们的配置、激活前后生命周期和
+ * PDO 周期调用。此类不创建实时线程、不 sleep、不调用业务或算法，也不
+ * 包含具体设备 PDO。
  */
 class IghMaster {
 public:
@@ -40,11 +48,16 @@ public:
     IghMaster(const IghMaster &) = delete;
     IghMaster &operator=(const IghMaster &) = delete;
 
-    /** @brief 在 Configure() 前注册一个设备适配器。 */
-    MasterResult AddDevice(device::BasisDevice &device);
+    /**
+     * @brief 在 Configure() 前注册并接管一个设备适配器。
+     *
+     * 仅在返回 Success 时所有权转移给 IghMaster；失败时 device 保持由
+     * 调用方持有，调用方可自行处理或复用它。
+     */
+    MasterResult AddDevice(std::unique_ptr<device::IghDevice> &device);
 
     /** @brief 指定已注册设备作为 EtherCAT DC 参考时钟。 */
-    MasterResult SetReferenceClockDevice(device::BasisDevice &device);
+    MasterResult SetReferenceClockDevice(const device::IghDevice &device);
 
     /** @brief 请求 IgH master，创建 domain，并调用所有设备 Configure()。 */
     MasterResult Configure();
@@ -71,22 +84,22 @@ public:
     void Release();
 
     MasterState state() const { return state_; }
-    ec_master_t *native_master() const { return master_; }
+    ec_master_t *native_master() const { return master_.get(); }
     ec_domain_t *native_domain() const { return domain_; }
 
 private:
-    bool ContainsDevice(const device::BasisDevice &device) const;
+    bool ContainsDevice(const device::IghDevice &device) const;
 
     uint32_t master_index_ = 0;
     uint32_t cycle_time_ns_ = 0;
     MasterState state_ = MasterState::Initial;
 
-    ec_master_t *master_ = nullptr;
+    std::unique_ptr<ec_master_t, NativeMasterDeleter> master_;
     ec_domain_t *domain_ = nullptr;
     uint8_t *domain_pd_ = nullptr;
 
-    device::BasisDevice *reference_clock_device_ = nullptr;
-    std::vector<device::BasisDevice *> devices_;
+    const device::IghDevice *reference_clock_device_ = nullptr;
+    std::vector<std::unique_ptr<device::IghDevice>> devices_;
 };
 
 }  // namespace master

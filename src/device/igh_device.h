@@ -23,15 +23,18 @@ struct DeviceConfiguration {
  * @brief IgH 从站设备适配器的公共基类。
  *
  * 主站只管理 EtherCAT 周期与 Domain；具体设备类负责自身的 PDO、DC、
- * SDO 和过程数据映射。所有对象必须在 IghMaster::Configure() 前创建并
- * AddDevice()，实时循环中不允许新增或删除设备。
+ * SDO 和过程数据映射。业务层只需要派生此类实现具体设备，然后将
+ * std::unique_ptr<IghDevice> 交给 IghMaster 管理。
+ *
+ * 所有设备必须在 IghMaster::Configure() 前注册；实时循环中不允许新增、
+ * 删除或替换设备。
  */
-class BasisDevice {
+class IghDevice {
 public:
-    virtual ~BasisDevice() = default;
+    virtual ~IghDevice() = default;
 
-    BasisDevice(const BasisDevice &) = delete;
-    BasisDevice &operator=(const BasisDevice &) = delete;
+    IghDevice(const IghDevice &) = delete;
+    IghDevice &operator=(const IghDevice &) = delete;
 
     /**
      * @brief 配置设备的从站、PDO、DC 和 PDO entry 注册。
@@ -59,8 +62,16 @@ public:
      */
     virtual void WriteProcessData(uint8_t *domain_pd) noexcept = 0;
 
+    /**
+     * @brief 在 IghMaster 释放底层 master 前清除设备保存的配置状态。
+     *
+     * 派生类可在此重置 slave_config、PDO offset、通信状态等由 Configure()
+     * 建立的数据。默认实现为空，适用于未保存此类状态的设备。
+     */
+    virtual void Reset() noexcept {}
+
 protected:
-    BasisDevice() = default;
+    IghDevice() = default;
 };
 
 }  // namespace device

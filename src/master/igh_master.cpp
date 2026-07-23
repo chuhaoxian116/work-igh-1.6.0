@@ -4,6 +4,12 @@
 
 namespace master {
 
+void NativeMasterDeleter::operator()(ec_master_t *master) const noexcept {
+    if (master) {
+        ecrt_release_master(master);
+    }
+}
+
 IghMaster::IghMaster(uint32_t master_index, uint32_t cycle_time_ns)
     : master_index_(master_index), cycle_time_ns_(cycle_time_ns) {}
 
@@ -11,19 +17,20 @@ IghMaster::~IghMaster() {
     Release();
 }
 
-MasterResult IghMaster::AddDevice(device::BasisDevice &device) {
-    if (state_ != MasterState::Initial) {
+MasterResult IghMaster::AddDevice(std::unique_ptr<device::IghDevice> &device) {
+    if (state_ != MasterState::Initial || !device) {
         return MasterResult::InvalidState;
     }
-    if (ContainsDevice(device)) {
+    if (ContainsDevice(*device)) {
         return MasterResult::InvalidArgument;
     }
 
-    devices_.push_back(&device);
+    devices_.push_back(std::move(device));
     return MasterResult::Success;
 }
 
-MasterResult IghMaster::SetReferenceClockDevice(device::BasisDevice &device) {
+MasterResult IghMaster::SetReferenceClockDevice(
+    const device::IghDevice &device) {
     if (state_ != MasterState::Initial) {
         return MasterResult::InvalidState;
     }
@@ -40,20 +47,20 @@ MasterResult IghMaster::Configure() {
         return MasterResult::InvalidState;
     }
 
-    master_ = ecrt_request_master(master_index_);
+    master_.reset(ecrt_request_master(master_index_));
     if (!master_) {
         return MasterResult::Error;
     }
 
-    domain_ = ecrt_master_create_domain(master_);
+    domain_ = ecrt_master_create_domain(master_.get());
     if (!domain_) {
         Release();
         return MasterResult::Error;
     }
 
     const device::DeviceConfiguration configuration{
-        master_, domain_, cycle_time_ns_};
-    for (device::BasisDevice *device : devices_) {
+        master_.get(), domain_, cycle_time_ns_};
+    for (const std::unique_ptr<device::IghDevice> &device : devices_) {
         if (!device->Configure(configuration)) {
             Release();
             return MasterResult::Error;
@@ -62,8 +69,8 @@ MasterResult IghMaster::Configure() {
 
     if (reference_clock_device_ &&
         (!reference_clock_device_->slave_config() ||
-         ecrt_master_select_reference_clock(
-             master_, reference_clock_device_->slave_config()))) {
+             ecrt_master_select_reference_clock(
+             master_.get(), reference_clock_device_->slave_config()))) {
         Release();
         return MasterResult::Error;
     }
@@ -76,7 +83,7 @@ MasterResult IghMaster::Activate() {
     if (state_ != MasterState::Configured) {
         return MasterResult::InvalidState;
     }
-    if (ecrt_master_activate(master_)) {
+    if (ecrt_master_activate(master_.get())) {
         Release();
         return MasterResult::Error;
     }
@@ -96,11 +103,11 @@ MasterResult IghMaster::ReceiveAndProcess(uint64_t application_time_ns) {
         return MasterResult::InvalidState;
     }
 
-    ecrt_master_application_time(master_, application_time_ns);
-    ecrt_master_receive(master_);
+    ecrt_master_application_time(master_.get(), application_time_ns);
+    ecrt_master_receive(master_.get());
     ecrt_domain_process(domain_);
 
-    for (device::BasisDevice *device : devices_) {
+    for (const std::unique_ptr<device::IghDevice> &device : devices_) {
         device->ReadProcessData(domain_pd_);
     }
     return MasterResult::Success;
@@ -111,33 +118,36 @@ MasterResult IghMaster::QueueAndSend(bool synchronize_dc) {
         return MasterResult::InvalidState;
     }
 
-    for (device::BasisDevice *device : devices_) {
+    for (const std::unique_ptr<device::IghDevice> &device : devices_) {
         device->WriteProcessData(domain_pd_);
     }
 
     if (synchronize_dc) {
-        ecrt_master_sync_reference_clock(master_);
-        ecrt_master_sync_slave_clocks(master_);
+        ecrt_master_sync_reference_clock(master_.get());
+        ecrt_master_sync_slave_clocks(master_.get());
     }
     ecrt_domain_queue(domain_);
-    ecrt_master_send(master_);
+    ecrt_master_send(master_.get());
     return MasterResult::Success;
 }
 
 void IghMaster::Release() {
-    if (master_) {
-        ecrt_release_master(master_);
+    for (const std::unique_ptr<device::IghDevice> &device : devices_) {
+        device->Reset();
     }
 
-    master_ = nullptr;
+    master_.reset();
     domain_ = nullptr;
     domain_pd_ = nullptr;
     state_ = MasterState::Initial;
 }
 
-bool IghMaster::ContainsDevice(const device::BasisDevice &device) const {
-    return std::find(devices_.begin(), devices_.end(), &device) !=
-           devices_.end();
+bool IghMaster::ContainsDevice(const device::IghDevice &device) const {
+    return std::any_of(
+        devices_.begin(), devices_.end(),
+        [&device](const std::unique_ptr<device::IghDevice> &registered) {
+            return registered.get() == &device;
+        });
 }
 
 }  // namespace master
