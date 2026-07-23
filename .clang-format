@@ -3,7 +3,7 @@ Language: Cpp
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never
-ColumnLimit: 88
+ColumnLimit: 150
 BreakBeforeBraces: Attach
 AllowShortFunctionsOnASingleLine: Empty
 AllowShortIfStatementsOnASingleLine: Never
