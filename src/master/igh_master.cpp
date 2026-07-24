@@ -19,8 +19,11 @@ IghMaster::~IghMaster() {
 }
 
 MasterResult IghMaster::AddDevice(std::unique_ptr<device::IghDevice> &device) {
-    if (state_ != MasterState::Initial || !device) {
+    if (state_ != MasterState::Initial) {
         return MasterResult::InvalidState;
+    }
+    if (!device) {
+        return MasterResult::InvalidArgument;
     }
     if (ContainsDevice(*device)) {
         return MasterResult::InvalidArgument;

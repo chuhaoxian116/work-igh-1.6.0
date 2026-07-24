@@ -18,12 +18,11 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
   master_ = std::make_unique<master::IghMaster>(
       configuration_.master_index, configuration_.cycle_time_ns);
 
-  std::unique_ptr<device::IghDevice> gsd620 =
-      std::make_unique<device::Gsd620Device>(configuration_.gsd620);
-  auto *const gsd620_observer = static_cast<device::Gsd620Device *>(gsd620.get());
+  const auto gsd620_registration =
+      master_->AddDevice<device::Gsd620Device>(configuration_.gsd620);
 
-  if (master_->AddDevice(gsd620) != master::MasterResult::Success ||
-      master_->SetReferenceClockDevice(*gsd620_observer) !=
+  if (!gsd620_registration ||
+      master_->SetReferenceClockDevice(*gsd620_registration.device) !=
           master::MasterResult::Success ||
       master_->Configure() != master::MasterResult::Success ||
       master_->Activate() != master::MasterResult::Success) {
@@ -31,7 +30,7 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
     return OrchestratorResult::MasterError;
   }
 
-  gsd620_device_ = gsd620_observer;
+  gsd620_device_ = gsd620_registration.device;
   return OrchestratorResult::Success;
 }
 

@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "device/igh_device.h"
@@ -22,6 +24,28 @@ enum class MasterResult : uint8_t {
     InvalidState = 1,    // 当前主站生命周期状态不允许调用。
     InvalidArgument = 2, // 参数为空、重复或不属于当前主站。
     Error = 3,           // IgH 底层调用或设备适配器配置失败。
+};
+
+/**
+ * @brief 模板化设备注册接口的返回结果。
+ *
+ * device 只是观察指针；注册成功后对象由 IghMaster 独占管理，调用方不得
+ * delete。注册失败时 device 为 nullptr。
+ */
+template <typename DeviceType>
+struct DeviceAddResult {
+  MasterResult result = MasterResult::Error; // 设备注册结果。
+  DeviceType *device = nullptr;              // 注册成功后的非拥有型设备观察指针。
+
+  /**
+   * @brief 判断设备是否注册成功。
+   *
+   * @return true result 为 Success 且 device 有效。
+   * @return false 设备注册失败。
+   */
+  explicit operator bool() const noexcept {
+    return result == MasterResult::Success && device != nullptr;
+  }
 };
 
 /** @brief 由 IghMaster 独占管理的 IgH master 句柄删除器。 */
@@ -77,6 +101,41 @@ public:
    * @return InvalidArgument device 为空或该对象已被注册。
    */
   MasterResult AddDevice(std::unique_ptr<device::IghDevice> &device);
+
+  /**
+   * @brief 构造、注册并接管一个具体类型的从站适配器。
+   *
+   * 本接口用于初始化阶段减少 make_unique、基类指针转换和观察指针保存的
+   * 样板代码。DeviceType 必须派生自 IghDevice，且不能是抽象类。
+   *
+   * @tparam DeviceType 需要创建的具体从站适配器类型。
+   * @tparam Args DeviceType 构造函数参数类型。
+   * @param args 转发给 DeviceType 构造函数的参数。
+   * @return 注册结果以及成功后的非拥有型具体设备观察指针。
+   */
+  template <typename DeviceType, typename... Args>
+  DeviceAddResult<DeviceType> AddDevice(Args &&...args) {
+    static_assert(std::is_base_of<device::IghDevice, DeviceType>::value,
+                  "DeviceType must derive from device::IghDevice");
+    static_assert(!std::is_abstract<DeviceType>::value,
+                  "DeviceType must be a concrete device adapter");
+
+    if (state_ != MasterState::Initial) {
+      return {MasterResult::InvalidState, nullptr};
+    }
+
+    auto concrete_device =
+        std::make_unique<DeviceType>(std::forward<Args>(args)...);
+    DeviceType *const observer = concrete_device.get();
+    std::unique_ptr<device::IghDevice> base_device =
+        std::move(concrete_device);
+
+    const MasterResult result = AddDevice(base_device);
+    if (result != MasterResult::Success) {
+      return {result, nullptr};
+    }
+    return {MasterResult::Success, observer};
+  }
 
   /**
    * @brief 指定一个已注册从站作为 EtherCAT DC 参考时钟。
