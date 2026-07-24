@@ -35,18 +35,19 @@ constexpr ec_sync_info_t kSyncs[] = {
 
 }  // namespace
 
-Gsd620Device::Gsd620Device(Gsd620Configuration configuration)
-    : configuration_(configuration) {}
+Gsd620Device::Gsd620Device(Gsd620Configuration configuration) : configuration_(configuration) {}
 
-bool Gsd620Device::Configure(const DeviceConfiguration &configuration) {
+bool Gsd620Device::Configure(const DeviceConfiguration& configuration) {
     if (!configuration.master || !configuration.domain ||
         (configuration_.enable_dc && configuration.cycle_time_ns == 0)) {
         return false;
     }
 
-    slave_config_ = ecrt_master_slave_config(
-        configuration.master, configuration_.alias, configuration_.position,
-        configuration_.vendor_id, configuration_.product_code);
+    slave_config_ = ecrt_master_slave_config(configuration.master,
+                                             configuration_.alias,
+                                             configuration_.position,
+                                             configuration_.vendor_id,
+                                             configuration_.product_code);
     if (!slave_config_) {
         return false;
     }
@@ -57,16 +58,17 @@ bool Gsd620Device::Configure(const DeviceConfiguration &configuration) {
     }
 
     BuildPdoEntryRegistrations();
-    if (ecrt_domain_reg_pdo_entry_list(configuration.domain,
-                                       pdo_entry_regs_.data())) {
+    if (ecrt_domain_reg_pdo_entry_list(configuration.domain, pdo_entry_regs_.data())) {
         Reset();
         return false;
     }
 
-    if (configuration_.enable_dc &&
-        ecrt_slave_config_dc(slave_config_, configuration_.dc_assign_activate,
-                             configuration.cycle_time_ns,
-                             configuration_.sync0_shift_ns, 0, 0)) {
+    if (configuration_.enable_dc && ecrt_slave_config_dc(slave_config_,
+                                                         configuration_.dc_assign_activate,
+                                                         configuration.cycle_time_ns,
+                                                         configuration_.sync0_shift_ns,
+                                                         0,
+                                                         0)) {
         Reset();
         return false;
     }
@@ -74,41 +76,32 @@ bool Gsd620Device::Configure(const DeviceConfiguration &configuration) {
     return true;
 }
 
-ec_slave_config_t *Gsd620Device::slave_config() const {
+ec_slave_config_t* Gsd620Device::slave_config() const {
     return slave_config_;
 }
 
-void Gsd620Device::ReadProcessData(const uint8_t *domain_pd) noexcept {
+void Gsd620Device::ReadProcessData(const uint8_t* domain_pd) noexcept {
     if (!domain_pd) {
         return;
     }
 
-    cyclic_data_.actual_position =
-        EC_READ_S32(domain_pd + pdo_offsets_.actual_position);
-    cyclic_data_.actual_velocity =
-        EC_READ_S32(domain_pd + pdo_offsets_.actual_velocity);
-    cyclic_data_.actual_torque =
-        EC_READ_S16(domain_pd + pdo_offsets_.actual_torque);
+    cyclic_data_.actual_position = EC_READ_S32(domain_pd + pdo_offsets_.actual_position);
+    cyclic_data_.actual_velocity = EC_READ_S32(domain_pd + pdo_offsets_.actual_velocity);
+    cyclic_data_.actual_torque = EC_READ_S16(domain_pd + pdo_offsets_.actual_torque);
     cyclic_data_.error_code = EC_READ_U16(domain_pd + pdo_offsets_.error_code);
-    cyclic_data_.statusword =
-        EC_READ_U16(domain_pd + pdo_offsets_.statusword);
-    cyclic_data_.mode_display =
-        EC_READ_S8(domain_pd + pdo_offsets_.mode_display);
+    cyclic_data_.statusword = EC_READ_U16(domain_pd + pdo_offsets_.statusword);
+    cyclic_data_.mode_display = EC_READ_S8(domain_pd + pdo_offsets_.mode_display);
 }
 
-void Gsd620Device::WriteProcessData(uint8_t *domain_pd) noexcept {
+void Gsd620Device::WriteProcessData(uint8_t* domain_pd) noexcept {
     if (!domain_pd) {
         return;
     }
 
-    EC_WRITE_S32(domain_pd + pdo_offsets_.target_position,
-                 cyclic_data_.target_position);
-    EC_WRITE_S32(domain_pd + pdo_offsets_.target_velocity,
-                 cyclic_data_.target_velocity);
-    EC_WRITE_U16(domain_pd + pdo_offsets_.controlword,
-                 cyclic_data_.controlword);
-    EC_WRITE_S16(domain_pd + pdo_offsets_.target_torque,
-                 cyclic_data_.target_torque);
+    EC_WRITE_S32(domain_pd + pdo_offsets_.target_position, cyclic_data_.target_position);
+    EC_WRITE_S32(domain_pd + pdo_offsets_.target_velocity, cyclic_data_.target_velocity);
+    EC_WRITE_U16(domain_pd + pdo_offsets_.controlword, cyclic_data_.controlword);
+    EC_WRITE_S16(domain_pd + pdo_offsets_.target_torque, cyclic_data_.target_torque);
     EC_WRITE_S8(domain_pd + pdo_offsets_.mode, cyclic_data_.mode);
 }
 
@@ -126,28 +119,73 @@ void Gsd620Device::BuildPdoEntryRegistrations() noexcept {
     const uint32_t product_code = configuration_.product_code;
 
     pdo_entry_regs_ = {{
-        {alias, position, vendor_id, product_code, 0x607A, 0x00,
-         &pdo_offsets_.target_position, nullptr},
-        {alias, position, vendor_id, product_code, 0x60FF, 0x00,
-         &pdo_offsets_.target_velocity, nullptr},
-        {alias, position, vendor_id, product_code, 0x6040, 0x00,
-         &pdo_offsets_.controlword, nullptr},
-        {alias, position, vendor_id, product_code, 0x6071, 0x00,
-         &pdo_offsets_.target_torque, nullptr},
-        {alias, position, vendor_id, product_code, 0x6060, 0x00,
-         &pdo_offsets_.mode, nullptr},
-        {alias, position, vendor_id, product_code, 0x6064, 0x00,
-         &pdo_offsets_.actual_position, nullptr},
-        {alias, position, vendor_id, product_code, 0x603F, 0x00,
-         &pdo_offsets_.error_code, nullptr},
-        {alias, position, vendor_id, product_code, 0x606C, 0x00,
-         &pdo_offsets_.actual_velocity, nullptr},
-        {alias, position, vendor_id, product_code, 0x6041, 0x00,
-         &pdo_offsets_.statusword, nullptr},
-        {alias, position, vendor_id, product_code, 0x6077, 0x00,
-         &pdo_offsets_.actual_torque, nullptr},
-        {alias, position, vendor_id, product_code, 0x6061, 0x00,
-         &pdo_offsets_.mode_display, nullptr},
+        {alias,
+         position,
+         vendor_id,
+         product_code,
+         0x607A,
+         0x00,
+         &pdo_offsets_.target_position,
+         nullptr},
+        {alias,
+         position,
+         vendor_id,
+         product_code,
+         0x60FF,
+         0x00,
+         &pdo_offsets_.target_velocity,
+         nullptr},
+        {alias,
+         position,
+         vendor_id,
+         product_code,
+         0x6040,
+         0x00,
+         &pdo_offsets_.controlword,
+         nullptr},
+        {alias,
+         position,
+         vendor_id,
+         product_code,
+         0x6071,
+         0x00,
+         &pdo_offsets_.target_torque,
+         nullptr},
+        {alias, position, vendor_id, product_code, 0x6060, 0x00, &pdo_offsets_.mode, nullptr},
+        {alias,
+         position,
+         vendor_id,
+         product_code,
+         0x6064,
+         0x00,
+         &pdo_offsets_.actual_position,
+         nullptr},
+        {alias, position, vendor_id, product_code, 0x603F, 0x00, &pdo_offsets_.error_code, nullptr},
+        {alias,
+         position,
+         vendor_id,
+         product_code,
+         0x606C,
+         0x00,
+         &pdo_offsets_.actual_velocity,
+         nullptr},
+        {alias, position, vendor_id, product_code, 0x6041, 0x00, &pdo_offsets_.statusword, nullptr},
+        {alias,
+         position,
+         vendor_id,
+         product_code,
+         0x6077,
+         0x00,
+         &pdo_offsets_.actual_torque,
+         nullptr},
+        {alias,
+         position,
+         vendor_id,
+         product_code,
+         0x6061,
+         0x00,
+         &pdo_offsets_.mode_display,
+         nullptr},
         {},  // IgH PDO entry 注册列表结束标记。
     }};
 }

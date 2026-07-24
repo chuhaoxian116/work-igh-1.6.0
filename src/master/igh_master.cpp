@@ -4,7 +4,7 @@
 
 namespace master {
 
-void NativeMasterDeleter::operator()(ec_master_t *master) const noexcept {
+void NativeMasterDeleter::operator()(ec_master_t* master) const noexcept {
     // ecrt_release_master() 会同时释放该 master 创建的 domain 和从站配置。
     if (master) {
         ecrt_release_master(master);
@@ -18,7 +18,7 @@ IghMaster::~IghMaster() {
     Release();
 }
 
-MasterResult IghMaster::AddDevice(std::unique_ptr<device::IghDevice> &device) {
+MasterResult IghMaster::AddDevice(std::unique_ptr<device::IghDevice>& device) {
     if (state_ != MasterState::Initial) {
         return MasterResult::InvalidState;
     }
@@ -33,8 +33,7 @@ MasterResult IghMaster::AddDevice(std::unique_ptr<device::IghDevice> &device) {
     return MasterResult::Success;
 }
 
-MasterResult IghMaster::SetReferenceClockDevice(
-    const device::IghDevice &device) {
+MasterResult IghMaster::SetReferenceClockDevice(const device::IghDevice& device) {
     if (state_ != MasterState::Initial) {
         return MasterResult::InvalidState;
     }
@@ -64,9 +63,8 @@ MasterResult IghMaster::Configure() {
     }
 
     // 所有从站共享同一个 master、单个 PDO domain 和标称通信周期。
-    const device::DeviceConfiguration configuration{
-        master_.get(), domain_, cycle_time_ns_};
-    for (const std::unique_ptr<device::IghDevice> &device : devices_) {
+    const device::DeviceConfiguration configuration{master_.get(), domain_, cycle_time_ns_};
+    for (const std::unique_ptr<device::IghDevice>& device : devices_) {
         if (!device->Configure(configuration)) {
             Release();
             return MasterResult::Error;
@@ -74,10 +72,9 @@ MasterResult IghMaster::Configure() {
     }
 
     // 参考时钟必须在主站激活前选择。
-    if (reference_clock_device_ &&
-        (!reference_clock_device_->slave_config() ||
-             ecrt_master_select_reference_clock(
-             master_.get(), reference_clock_device_->slave_config()))) {
+    if (reference_clock_device_ && (!reference_clock_device_->slave_config() ||
+                                    ecrt_master_select_reference_clock(
+                                        master_.get(), reference_clock_device_->slave_config()))) {
         Release();
         return MasterResult::Error;
     }
@@ -116,7 +113,7 @@ MasterResult IghMaster::ReceiveAndProcess(uint64_t application_time_ns) {
     ecrt_master_receive(master_.get());
     ecrt_domain_process(domain_);
 
-    for (const std::unique_ptr<device::IghDevice> &device : devices_) {
+    for (const std::unique_ptr<device::IghDevice>& device : devices_) {
         device->ReadProcessData(domain_pd_);
     }
     return MasterResult::Success;
@@ -128,7 +125,7 @@ MasterResult IghMaster::QueueAndSend(bool synchronize_dc) {
     }
 
     // 先由设备写入 RxPDO，再将整个 domain 排队并发送。
-    for (const std::unique_ptr<device::IghDevice> &device : devices_) {
+    for (const std::unique_ptr<device::IghDevice>& device : devices_) {
         device->WriteProcessData(domain_pd_);
     }
 
@@ -143,7 +140,7 @@ MasterResult IghMaster::QueueAndSend(bool synchronize_dc) {
 
 void IghMaster::Release() {
     // 设备先清除保存的 IgH 句柄和 PDO offset，避免保留已失效的地址。
-    for (const std::unique_ptr<device::IghDevice> &device : devices_) {
+    for (const std::unique_ptr<device::IghDevice>& device : devices_) {
         device->Reset();
     }
 
@@ -153,12 +150,12 @@ void IghMaster::Release() {
     state_ = MasterState::Initial;
 }
 
-bool IghMaster::ContainsDevice(const device::IghDevice &device) const {
-    return std::any_of(
-        devices_.begin(), devices_.end(),
-        [&device](const std::unique_ptr<device::IghDevice> &registered) {
-            return registered.get() == &device;
-        });
+bool IghMaster::ContainsDevice(const device::IghDevice& device) const {
+    return std::any_of(devices_.begin(),
+                       devices_.end(),
+                       [&device](const std::unique_ptr<device::IghDevice>& registered) {
+                           return registered.get() == &device;
+                       });
 }
 
 }  // namespace master

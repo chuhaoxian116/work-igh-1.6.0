@@ -2,62 +2,58 @@
 
 namespace orchestrator {
 
-RobotEthercatOrchestrator::RobotEthercatOrchestrator(
-    RobotEthercatConfiguration configuration)
+RobotEthercatOrchestrator::RobotEthercatOrchestrator(RobotEthercatConfiguration configuration)
     : configuration_(configuration) {}
 
 RobotEthercatOrchestrator::~RobotEthercatOrchestrator() {
-  Shutdown();
+    Shutdown();
 }
 
 OrchestratorResult RobotEthercatOrchestrator::Initialize() {
-  if (master_ || configuration_.cycle_time_ns == 0) {
-    return OrchestratorResult::InvalidState;
-  }
+    if (master_ || configuration_.cycle_time_ns == 0) {
+        return OrchestratorResult::InvalidState;
+    }
 
-  master_ = std::make_unique<master::IghMaster>(
-      configuration_.master_index, configuration_.cycle_time_ns);
+    master_ = std::make_unique<master::IghMaster>(configuration_.master_index,
+                                                  configuration_.cycle_time_ns);
 
-  const auto gsd620_registration =
-      master_->AddDevice<device::Gsd620Device>(configuration_.gsd620);
+    const auto gsd620_registration =
+        master_->AddDevice<device::Gsd620Device>(configuration_.gsd620);
 
-  if (!gsd620_registration ||
-      master_->SetReferenceClockDevice(*gsd620_registration.device) !=
-          master::MasterResult::Success ||
-      master_->Configure() != master::MasterResult::Success ||
-      master_->Activate() != master::MasterResult::Success) {
-    Shutdown();
-    return OrchestratorResult::MasterError;
-  }
+    if (!gsd620_registration ||
+        master_->SetReferenceClockDevice(*gsd620_registration.device) !=
+            master::MasterResult::Success ||
+        master_->Configure() != master::MasterResult::Success ||
+        master_->Activate() != master::MasterResult::Success) {
+        Shutdown();
+        return OrchestratorResult::MasterError;
+    }
 
-  gsd620_device_ = gsd620_registration.device;
-  return OrchestratorResult::Success;
+    gsd620_device_ = gsd620_registration.device;
+    return OrchestratorResult::Success;
 }
 
-OrchestratorResult RobotEthercatOrchestrator::RunCycle(
-    uint64_t application_time_ns) {
-  if (!master_ || master_->state() != master::MasterState::Active) {
-    return OrchestratorResult::InvalidState;
-  }
+OrchestratorResult RobotEthercatOrchestrator::RunCycle(uint64_t application_time_ns) {
+    if (!master_ || master_->state() != master::MasterState::Active) {
+        return OrchestratorResult::InvalidState;
+    }
 
-  if (master_->ReceiveAndProcess(application_time_ns) !=
-      master::MasterResult::Success) {
-    return OrchestratorResult::MasterError;
-  }
+    if (master_->ReceiveAndProcess(application_time_ns) != master::MasterResult::Success) {
+        return OrchestratorResult::MasterError;
+    }
 
-  // Runtime、算法和业务数据映射将在后续放在这里。
+    // Runtime、算法和业务数据映射将在后续放在这里。
 
-  if (master_->QueueAndSend(configuration_.synchronize_dc) !=
-      master::MasterResult::Success) {
-    return OrchestratorResult::MasterError;
-  }
+    if (master_->QueueAndSend(configuration_.synchronize_dc) != master::MasterResult::Success) {
+        return OrchestratorResult::MasterError;
+    }
 
-  return OrchestratorResult::Success;
+    return OrchestratorResult::Success;
 }
 
 void RobotEthercatOrchestrator::Shutdown() {
-  gsd620_device_ = nullptr;
-  master_.reset();
+    gsd620_device_ = nullptr;
+    master_.reset();
 }
 
-} // namespace orchestrator
+}  // namespace orchestrator
