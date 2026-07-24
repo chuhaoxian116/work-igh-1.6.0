@@ -38,11 +38,13 @@ constexpr ec_sync_info_t kSyncs[] = {
 Gsd620Device::Gsd620Device(Gsd620Configuration configuration) : configuration_(configuration) {}
 
 bool Gsd620Device::Configure(const DeviceConfiguration& configuration) {
+    // 步骤 1：检查主站配置上下文以及启用 DC 时所需的周期参数。
     if (!configuration.master || !configuration.domain ||
         (configuration_.enable_dc && configuration.cycle_time_ns == 0)) {
         return false;
     }
 
+    // 步骤 2：按照 alias、position 和设备身份取得 IgH 从站配置对象。
     slave_config_ = ecrt_master_slave_config(configuration.master,
                                              configuration_.alias,
                                              configuration_.position,
@@ -52,17 +54,20 @@ bool Gsd620Device::Configure(const DeviceConfiguration& configuration) {
         return false;
     }
 
+    // 步骤 3：将设备固定的 SM/PDO 映射写入从站配置。
     if (ecrt_slave_config_pdos(slave_config_, EC_END, kSyncs)) {
         Reset();
         return false;
     }
 
+    // 步骤 4：生成 PDO entry 注册表，并交给公共 Domain 计算偏移。
     BuildPdoEntryRegistrations();
     if (ecrt_domain_reg_pdo_entry_list(configuration.domain, pdo_entry_regs_.data())) {
         Reset();
         return false;
     }
 
+    // 步骤 5：仅对启用 DC 的设备配置 SYNC0；非 DC 从站跳过此步骤。
     if (configuration_.enable_dc && ecrt_slave_config_dc(slave_config_,
                                                          configuration_.dc_assign_activate,
                                                          configuration.cycle_time_ns,
@@ -81,10 +86,12 @@ ec_slave_config_t* Gsd620Device::slave_config() const {
 }
 
 void Gsd620Device::ReadProcessData(const uint8_t* domain_pd) noexcept {
+    // 步骤 1：Domain 尚未激活或数据地址无效时不访问过程数据。
     if (!domain_pd) {
         return;
     }
 
+    // 步骤 2：依据 Configure() 得到的偏移读取本周期全部 TxPDO 反馈。
     cyclic_data_.actual_position = EC_READ_S32(domain_pd + pdo_offsets_.actual_position);
     cyclic_data_.actual_velocity = EC_READ_S32(domain_pd + pdo_offsets_.actual_velocity);
     cyclic_data_.actual_torque = EC_READ_S16(domain_pd + pdo_offsets_.actual_torque);
@@ -94,10 +101,12 @@ void Gsd620Device::ReadProcessData(const uint8_t* domain_pd) noexcept {
 }
 
 void Gsd620Device::WriteProcessData(uint8_t* domain_pd) noexcept {
+    // 步骤 1：Domain 尚未激活或数据地址无效时不写过程数据。
     if (!domain_pd) {
         return;
     }
 
+    // 步骤 2：依据 Configure() 得到的偏移写入本周期全部 RxPDO 命令。
     EC_WRITE_S32(domain_pd + pdo_offsets_.target_position, cyclic_data_.target_position);
     EC_WRITE_S32(domain_pd + pdo_offsets_.target_velocity, cyclic_data_.target_velocity);
     EC_WRITE_U16(domain_pd + pdo_offsets_.controlword, cyclic_data_.controlword);
@@ -106,18 +115,23 @@ void Gsd620Device::WriteProcessData(uint8_t* domain_pd) noexcept {
 }
 
 void Gsd620Device::Reset() noexcept {
+    // 步骤 1：清除随 IgH master 释放而失效的从站句柄和 PDO 偏移。
     slave_config_ = nullptr;
     pdo_offsets_ = {};
     pdo_entry_regs_ = {};
+
+    // 步骤 2：清空反馈与命令，避免下次初始化沿用旧周期数据。
     cyclic_data_ = {};
 }
 
 void Gsd620Device::BuildPdoEntryRegistrations() noexcept {
+    // 步骤 1：缓存当前设备身份，供每个 PDO entry 使用同一组匹配信息。
     const uint16_t alias = configuration_.alias;
     const uint16_t position = configuration_.position;
     const uint32_t vendor_id = configuration_.vendor_id;
     const uint32_t product_code = configuration_.product_code;
 
+    // 步骤 2：按 PDO 映射顺序建立 entry 与本地 offset 字段的对应关系。
     pdo_entry_regs_ = {{
         {alias,
          position,

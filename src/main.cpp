@@ -25,6 +25,7 @@ volatile std::sig_atomic_t g_stop_requested = 0;  // 仅由信号处理函数写
  * @param signal 收到的 POSIX 信号编号。
  */
 void HandleStopSignal(int signal) {
+    // 步骤 1：信号处理函数只修改 signal-safe 标志，实际停机由主线程执行。
     (void)signal;
     g_stop_requested = 1;
 }
@@ -36,9 +37,11 @@ void HandleStopSignal(int signal) {
  * 以便开发阶段验证 EtherCAT 配置。
  */
 void ConfigureCurrentThreadRealtime() {
+    // 步骤 1：取得 SCHED_FIFO 允许的最高优先级。
     sched_param parameter{};
     parameter.sched_priority = sched_get_priority_max(SCHED_FIFO);
 
+    // 步骤 2：尝试为当前周期线程应用实时调度策略。
     const int result = pthread_setschedparam(pthread_self(), SCHED_FIFO, &parameter);
     if (result != 0) {
         std::fprintf(stderr, "warning: pthread_setschedparam(SCHED_FIFO) failed: %d\n", result);
@@ -54,7 +57,10 @@ void ConfigureCurrentThreadRealtime() {
 void AddNanoseconds(timespec& wakeup_time, uint32_t duration_ns) {
     constexpr long kNanosecondsPerSecond = 1'000'000'000L;
 
+    // 步骤 1：先把一个周期累加到纳秒字段。
     wakeup_time.tv_nsec += static_cast<long>(duration_ns);
+
+    // 步骤 2：将溢出的纳秒归一化到秒字段。
     while (wakeup_time.tv_nsec >= kNanosecondsPerSecond) {
         wakeup_time.tv_nsec -= kNanosecondsPerSecond;
         ++wakeup_time.tv_sec;
@@ -69,6 +75,8 @@ void AddNanoseconds(timespec& wakeup_time, uint32_t duration_ns) {
  */
 uint64_t ToNanoseconds(const timespec& time) {
     constexpr uint64_t kNanosecondsPerSecond = 1'000'000'000ULL;
+
+    // 步骤 1：统一转换为纳秒，作为 IgH application time。
     return static_cast<uint64_t>(time.tv_sec) * kNanosecondsPerSecond +
            static_cast<uint64_t>(time.tv_nsec);
 }
@@ -88,8 +96,10 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
                     uint32_t cycle_time_ns,
                     std::atomic_bool& keep_running,
                     std::atomic_bool& cycle_failed) {
+    // 步骤 1：为当前线程配置尽力而为的实时调度属性。
     ConfigureCurrentThreadRealtime();
 
+    // 步骤 2：读取单调时钟，并计算第一个绝对周期唤醒点。
     timespec wakeup_time{};
     if (clock_gettime(CLOCK_MONOTONIC, &wakeup_time) != 0) {
         std::perror("clock_gettime(CLOCK_MONOTONIC) failed");
@@ -100,6 +110,7 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
 
     AddNanoseconds(wakeup_time, cycle_time_ns);
     while (keep_running.load()) {
+        // 步骤 3：按绝对时间等待，避免相对 sleep 误差逐周期累积。
         const int sleep_result =
             clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup_time, nullptr);
         if (sleep_result != 0 && sleep_result != EINTR) {
@@ -112,6 +123,7 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
             continue;
         }
 
+        // 步骤 4：以本周期计划唤醒时间执行一次完整 EtherCAT 收发。
         if (application.RunCycle(ToNanoseconds(wakeup_time)) !=
             orchestrator::OrchestratorResult::Success) {
             cycle_failed.store(true);
@@ -119,6 +131,7 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
             return;
         }
 
+        // 步骤 5：推进到下一周期的绝对唤醒点。
         AddNanoseconds(wakeup_time, cycle_time_ns);
     }
 }
@@ -127,6 +140,7 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
  * @brief 尽力锁定当前进程内存，降低周期线程缺页风险。
  */
 void LockProcessMemory() {
+    // 步骤 1：锁定当前和未来映射的内存，降低实时周期中的缺页概率。
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
         std::perror("warning: mlockall failed");
     }
@@ -141,9 +155,11 @@ void LockProcessMemory() {
  * @return 1 主站初始化或实时周期失败。
  */
 int main() {
+    // 步骤 1：注册安全停机信号，信号处理函数只负责提出停止请求。
     std::signal(SIGINT, HandleStopSignal);
     std::signal(SIGTERM, HandleStopSignal);
 
+    // 步骤 2：组装主站参数与具体设备定义；GSD620 同时作为 DC 参考设备。
     orchestrator::RobotEthercatConfiguration configuration{};
     device::Gsd620Configuration gsd620_configuration{};
     device::DeviceSetup device_setup;
@@ -152,13 +168,16 @@ int main() {
     orchestrator::RobotEthercatOrchestrator application(configuration,
                                                         std::move(device_setup).Build());
 
+    // 步骤 3：统一注册从站、配置 PDO/DC，并激活 IgH master。
     if (application.Initialize() != orchestrator::OrchestratorResult::Success) {
         std::fprintf(stderr, "failed to initialize EtherCAT application\n");
         return 1;
     }
 
+    // 步骤 4：在启动周期线程前锁定进程内存。
     LockProcessMemory();
 
+    // 步骤 5：创建唯一 EtherCAT 周期线程。
     std::atomic_bool keep_running{true};   // 主线程和周期线程共享的运行状态。
     std::atomic_bool cycle_failed{false};  // 周期线程检测到不可恢复错误时置位。
     std::thread cycle_thread(RunCycleThread,
@@ -167,6 +186,7 @@ int main() {
                              std::ref(keep_running),
                              std::ref(cycle_failed));
 
+    // 步骤 6：主线程只监控停止请求，不参与 EtherCAT 周期收发。
     while (keep_running.load()) {
         if (g_stop_requested != 0) {
             keep_running.store(false);
@@ -175,9 +195,11 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
+    // 步骤 7：等待周期线程退出后释放主站和从站资源。
     cycle_thread.join();
     application.Shutdown();
 
+    // 步骤 8：区分周期故障退出与用户正常停止。
     if (cycle_failed.load()) {
         std::fprintf(stderr, "EtherCAT cycle stopped because of an error\n");
         return 1;

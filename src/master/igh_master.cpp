@@ -19,9 +19,12 @@ IghMaster::~IghMaster() {
 }
 
 MasterResult IghMaster::AddDevice(std::unique_ptr<device::IghDevice>& device) {
+    // 步骤 1：仅允许在请求 IgH master 前修改设备列表。
     if (state_ != MasterState::Initial) {
         return MasterResult::InvalidState;
     }
+
+    // 步骤 2：拒绝空设备以及同一对象的重复注册。
     if (!device) {
         return MasterResult::InvalidArgument;
     }
@@ -29,40 +32,47 @@ MasterResult IghMaster::AddDevice(std::unique_ptr<device::IghDevice>& device) {
         return MasterResult::InvalidArgument;
     }
 
+    // 步骤 3：注册成功后由 IghMaster 独占设备生命周期。
     devices_.push_back(std::move(device));
     return MasterResult::Success;
 }
 
 MasterResult IghMaster::SetReferenceClockDevice(const device::IghDevice& device) {
+    // 步骤 1：参考时钟必须在主站配置和激活前指定。
     if (state_ != MasterState::Initial) {
         return MasterResult::InvalidState;
     }
+
+    // 步骤 2：只接受已经由当前主站接管的设备。
     if (!ContainsDevice(device)) {
         return MasterResult::InvalidArgument;
     }
 
+    // 步骤 3：保存观察指针，实际 IgH 参考时钟选择在 Configure() 中完成。
     reference_clock_device_ = &device;
     return MasterResult::Success;
 }
 
 MasterResult IghMaster::Configure() {
+    // 步骤 1：检查生命周期状态并确保至少注册了一个从站。
     if (state_ != MasterState::Initial || devices_.empty()) {
         return MasterResult::InvalidState;
     }
 
-    // 从此处开始取得 IgH 资源；后续任何失败路径统一由 Release() 回收。
+    // 步骤 2：请求 IgH master；后续任何失败路径统一由 Release() 回收。
     master_.reset(ecrt_request_master(master_index_));
     if (!master_) {
         return MasterResult::Error;
     }
 
+    // 步骤 3：创建全部设备共享的单个过程数据 Domain。
     domain_ = ecrt_master_create_domain(master_.get());
     if (!domain_) {
         Release();
         return MasterResult::Error;
     }
 
-    // 所有从站共享同一个 master、单个 PDO domain 和标称通信周期。
+    // 步骤 4：依次让具体设备完成从站、PDO、SDO 和 DC 初始化。
     const device::DeviceConfiguration configuration{master_.get(), domain_, cycle_time_ns_};
     for (const std::unique_ptr<device::IghDevice>& device : devices_) {
         if (!device->Configure(configuration)) {
@@ -71,7 +81,7 @@ MasterResult IghMaster::Configure() {
         }
     }
 
-    // 参考时钟必须在主站激活前选择。
+    // 步骤 5：若上层指定了参考设备，则在主站激活前选择其 DC 时钟。
     if (reference_clock_device_ && (!reference_clock_device_->slave_config() ||
                                     ecrt_master_select_reference_clock(
                                         master_.get(), reference_clock_device_->slave_config()))) {
@@ -79,40 +89,47 @@ MasterResult IghMaster::Configure() {
         return MasterResult::Error;
     }
 
+    // 步骤 6：所有激活前配置成功，推进主站生命周期状态。
     state_ = MasterState::Configured;
     return MasterResult::Success;
 }
 
 MasterResult IghMaster::Activate() {
+    // 步骤 1：只有完成全部从站配置后才允许激活主站。
     if (state_ != MasterState::Configured) {
         return MasterResult::InvalidState;
     }
+
+    // 步骤 2：激活 IgH master，使 PDO Domain 进入可交换状态。
     if (ecrt_master_activate(master_.get())) {
         Release();
         return MasterResult::Error;
     }
 
-    // 只有激活成功后 domain process data 的基地址才有效。
+    // 步骤 3：取得激活后的 Domain 过程数据基地址。
     domain_pd_ = ecrt_domain_data(domain_);
     if (!domain_pd_) {
         Release();
         return MasterResult::Error;
     }
 
+    // 步骤 4：进入实时周期可调用状态。
     state_ = MasterState::Active;
     return MasterResult::Success;
 }
 
 MasterResult IghMaster::ReceiveAndProcess(uint64_t application_time_ns) {
+    // 步骤 1：实时收帧只允许在主站 Active 状态执行。
     if (state_ != MasterState::Active) {
         return MasterResult::InvalidState;
     }
 
-    // 收帧后先处理 domain，再让每个设备从 TxPDO 区域读取输入数据。
+    // 步骤 2：更新时间、接收 EtherCAT 帧并解析公共 Domain。
     ecrt_master_application_time(master_.get(), application_time_ns);
     ecrt_master_receive(master_.get());
     ecrt_domain_process(domain_);
 
+    // 步骤 3：让每个设备从各自的 TxPDO 区域更新周期反馈。
     for (const std::unique_ptr<device::IghDevice>& device : devices_) {
         device->ReadProcessData(domain_pd_);
     }
@@ -120,33 +137,40 @@ MasterResult IghMaster::ReceiveAndProcess(uint64_t application_time_ns) {
 }
 
 MasterResult IghMaster::QueueAndSend(bool synchronize_dc) {
+    // 步骤 1：实时发帧只允许在主站 Active 状态执行。
     if (state_ != MasterState::Active) {
         return MasterResult::InvalidState;
     }
 
-    // 先由设备写入 RxPDO，再将整个 domain 排队并发送。
+    // 步骤 2：让每个设备把当前命令写入各自的 RxPDO 区域。
     for (const std::unique_ptr<device::IghDevice>& device : devices_) {
         device->WriteProcessData(domain_pd_);
     }
 
+    // 步骤 3：按配置排队 DC 参考时钟及从站时钟同步报文。
     if (synchronize_dc) {
         ecrt_master_sync_reference_clock(master_.get());
         ecrt_master_sync_slave_clocks(master_.get());
     }
+
+    // 步骤 4：将完成写入的 Domain 排队并发送本周期 EtherCAT 帧。
     ecrt_domain_queue(domain_);
     ecrt_master_send(master_.get());
     return MasterResult::Success;
 }
 
 void IghMaster::Release() {
-    // 设备先清除保存的 IgH 句柄和 PDO offset，避免保留已失效的地址。
+    // 步骤 1：先让设备清除即将失效的 IgH 句柄和 PDO offset。
     for (const std::unique_ptr<device::IghDevice>& device : devices_) {
         device->Reset();
     }
 
+    // 步骤 2：释放 master 及其 Domain，并清除本地主站观察指针。
     master_.reset();
     domain_ = nullptr;
     domain_pd_ = nullptr;
+
+    // 步骤 3：保留设备对象，恢复为允许再次 Configure() 的初始状态。
     state_ = MasterState::Initial;
 }
 
