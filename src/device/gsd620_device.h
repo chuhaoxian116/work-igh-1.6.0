@@ -4,8 +4,6 @@
 #include <array>
 #include <cstdint>
 
-#include <cia402/cia402.h>
-
 #include "device/igh_device.h"
 
 namespace device {
@@ -24,23 +22,26 @@ struct Gsd620Configuration {
 
 /** @brief GSD620 当前周期的私有 PDO 数据。 */
 struct Gsd620CyclicData {
-    cia402::AxisData axis{};       // 供 CiA402 与 RobotRuntime 使用的状态字、模式和控制字。
+    int32_t target_position = 0; // 0x607A:00 目标位置。
+    int32_t target_velocity = 0; // 0x60FF:00 目标速度。
+    uint16_t controlword = 0;    // 0x6040:00 控制字。
+    int16_t target_torque = 0;   // 0x6071:00 目标转矩。
+    int8_t mode = 0;             // 0x6060:00 目标运行模式。
 
-    int32_t target_position = 0;   // 0x607A:00 目标位置。
-    int32_t target_velocity = 0;   // 0x60FF:00 目标速度。
-    int16_t target_torque = 0;     // 0x6071:00 目标转矩。
-
-    int32_t actual_position = 0;   // 0x6064:00 实际位置。
-    int32_t actual_velocity = 0;   // 0x606C:00 实际速度。
-    int16_t actual_torque = 0;     // 0x6077:00 实际转矩。
-    uint16_t error_code = 0;       // 0x603F:00 错误码。
+    int32_t actual_position = 0; // 0x6064:00 实际位置。
+    uint16_t error_code = 0;     // 0x603F:00 错误码。
+    int32_t actual_velocity = 0; // 0x606C:00 实际速度。
+    uint16_t statusword = 0;     // 0x6041:00 状态字。
+    int16_t actual_torque = 0;   // 0x6077:00 实际转矩。
+    int8_t mode_display = 0;     // 0x6061:00 实际运行模式。
 };
 
 /**
  * @brief GSD620 CiA402 伺服的最小 IgH 从站适配器。
  *
  * 本类仅完成 GSD620 的从站识别、PDO/SM、DC 配置与类型化 PDO 映射。
- * 上层后续可通过 cyclic_data() 将这些私有数据映射到 RobotRuntimeData。
+ * 上层后续可通过独立桥接层将 cyclic_data() 映射到 RobotRuntimeData，
+ * 本设备类不依赖 CiA402 状态机、RobotRuntime 或机器人业务定义。
  */
 class Gsd620Device final : public IghDevice {
 public:

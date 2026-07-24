@@ -90,9 +90,9 @@ void Gsd620Device::ReadProcessData(const uint8_t *domain_pd) noexcept {
     cyclic_data_.actual_torque =
         EC_READ_S16(domain_pd + pdo_offsets_.actual_torque);
     cyclic_data_.error_code = EC_READ_U16(domain_pd + pdo_offsets_.error_code);
-    cyclic_data_.axis.inData.statusword =
+    cyclic_data_.statusword =
         EC_READ_U16(domain_pd + pdo_offsets_.statusword);
-    cyclic_data_.axis.inData.mode_display =
+    cyclic_data_.mode_display =
         EC_READ_S8(domain_pd + pdo_offsets_.mode_display);
 }
 
@@ -106,10 +106,10 @@ void Gsd620Device::WriteProcessData(uint8_t *domain_pd) noexcept {
     EC_WRITE_S32(domain_pd + pdo_offsets_.target_velocity,
                  cyclic_data_.target_velocity);
     EC_WRITE_U16(domain_pd + pdo_offsets_.controlword,
-                 cyclic_data_.axis.outData.controlword);
+                 cyclic_data_.controlword);
     EC_WRITE_S16(domain_pd + pdo_offsets_.target_torque,
                  cyclic_data_.target_torque);
-    EC_WRITE_S8(domain_pd + pdo_offsets_.mode, cyclic_data_.axis.outData.mode);
+    EC_WRITE_S8(domain_pd + pdo_offsets_.mode, cyclic_data_.mode);
 }
 
 void Gsd620Device::Reset() noexcept {
