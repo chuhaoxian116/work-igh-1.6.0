@@ -5,12 +5,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <thread>
+#include <utility>
 
 #include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <time.h>
 
+#include "device/gsd620_device.h"
 #include "orchestrator/robot_ethercat_orchestrator.h"
 
 namespace {
@@ -143,7 +145,12 @@ int main() {
     std::signal(SIGTERM, HandleStopSignal);
 
     orchestrator::RobotEthercatConfiguration configuration{};
-    orchestrator::RobotEthercatOrchestrator application(configuration);
+    device::Gsd620Configuration gsd620_configuration{};
+    device::DeviceSetup device_setup;
+    device_setup.AddReferenceClockDevice<device::Gsd620Device>(gsd620_configuration);
+
+    orchestrator::RobotEthercatOrchestrator application(configuration,
+                                                        std::move(device_setup).Build());
 
     if (application.Initialize() != orchestrator::OrchestratorResult::Success) {
         std::fprintf(stderr, "failed to initialize EtherCAT application\n");

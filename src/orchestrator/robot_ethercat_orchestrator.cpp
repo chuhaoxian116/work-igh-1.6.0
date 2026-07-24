@@ -1,35 +1,56 @@
 #include "orchestrator/robot_ethercat_orchestrator.h"
 
+#include <utility>
+
 namespace orchestrator {
 
-RobotEthercatOrchestrator::RobotEthercatOrchestrator(RobotEthercatConfiguration configuration)
-    : configuration_(configuration) {}
+RobotEthercatOrchestrator::RobotEthercatOrchestrator(RobotEthercatConfiguration configuration,
+                                                     device::DeviceDefinitions device_definitions)
+    : configuration_(configuration), device_definitions_(std::move(device_definitions)) {}
 
 RobotEthercatOrchestrator::~RobotEthercatOrchestrator() {
     Shutdown();
 }
 
 OrchestratorResult RobotEthercatOrchestrator::Initialize() {
-    if (master_ || configuration_.cycle_time_ns == 0) {
+    if (master_ || configuration_.cycle_time_ns == 0 || device_definitions_.empty()) {
         return OrchestratorResult::InvalidState;
     }
 
     master_ = std::make_unique<master::IghMaster>(configuration_.master_index,
                                                   configuration_.cycle_time_ns);
 
-    const auto gsd620_registration =
-        master_->AddDevice<device::Gsd620Device>(configuration_.gsd620);
+    bool reference_clock_registered = false;
+    for (const device::DeviceDefinition& definition : device_definitions_) {
+        std::unique_ptr<device::IghDevice> ethercat_device = definition.CreateDevice();
+        if (!ethercat_device) {
+            Shutdown();
+            return OrchestratorResult::MasterError;
+        }
 
-    if (!gsd620_registration ||
-        master_->SetReferenceClockDevice(*gsd620_registration.device) !=
-            master::MasterResult::Success ||
-        master_->Configure() != master::MasterResult::Success ||
+        device::IghDevice* const device_observer = ethercat_device.get();
+        if (master_->AddDevice(ethercat_device) != master::MasterResult::Success) {
+            Shutdown();
+            return OrchestratorResult::MasterError;
+        }
+
+        // 支持零个或一个 DC 参考时钟,多个设备被标记为 DC 参考时钟时初始化失败。
+        if (definition.use_as_dc_reference_clock()) {
+            if (reference_clock_registered || master_->SetReferenceClockDevice(*device_observer) !=
+                                                  master::MasterResult::Success) {
+                Shutdown();
+                return OrchestratorResult::MasterError;
+            }
+            reference_clock_registered = true;
+        }
+    }
+
+    if (master_->Configure() != master::MasterResult::Success ||
         master_->Activate() != master::MasterResult::Success) {
         Shutdown();
         return OrchestratorResult::MasterError;
     }
 
-    gsd620_device_ = gsd620_registration.device;
     return OrchestratorResult::Success;
 }
 
@@ -52,7 +73,6 @@ OrchestratorResult RobotEthercatOrchestrator::RunCycle(uint64_t application_time
 }
 
 void RobotEthercatOrchestrator::Shutdown() {
-    gsd620_device_ = nullptr;
     master_.reset();
 }
 

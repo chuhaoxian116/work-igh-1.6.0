@@ -43,7 +43,7 @@ target_compile_options(igh_device_gsd620 PRIVATE
     -Wpedantic
 )
 
-# 当前机器人业务编排层：组合 Master 与具体从站，不属于 IgH 通用核心。
+# 通用机器人业务编排层：仅依赖 Master 和设备定义，不依赖具体从站。
 add_library(robot_ethercat_application STATIC
     orchestrator/robot_ethercat_orchestrator.cpp
 )
@@ -57,7 +57,6 @@ target_include_directories(robot_ethercat_application
 target_link_libraries(robot_ethercat_application
     PUBLIC
     igh::core
-    igh::device_gsd620
 )
 
 target_compile_options(robot_ethercat_application PRIVATE
@@ -74,6 +73,7 @@ add_executable(robot_ethercat_app
 
 target_link_libraries(robot_ethercat_app PRIVATE
     robot::ethercat_application
+    igh::device_gsd620
     Threads::Threads
     rt
 )
