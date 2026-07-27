@@ -1,5 +1,7 @@
 #include "device/cia402_standard_pdo_device.h"
 
+#include <cstdio>
+
 namespace device {
 namespace {
 
@@ -39,10 +41,20 @@ Cia402StandardPdoDevice::Cia402StandardPdoDevice(Cia402StandardPdoConfiguration 
     : configuration_(configuration) {}
 
 bool Cia402StandardPdoDevice::Configure(const DeviceConfiguration& configuration) {
+    std::printf(
+        "[ethercat][cia402] configure alias=0x%04X, position=%u, vendor=0x%08X, "
+        "product=0x%08X, dc=%s\n",
+        configuration_.alias,
+        configuration_.position,
+        configuration_.vendor_id,
+        configuration_.product_code,
+        configuration_.enable_dc ? "enabled" : "disabled");
+
     // 步骤 1：检查主站上下文、从站身份以及启用 DC 时需要的周期参数。
     if (!configuration.master || !configuration.domain || configuration_.vendor_id == 0 ||
         configuration_.product_code == 0 ||
         (configuration_.enable_dc && configuration.cycle_time_ns == 0)) {
+        std::fprintf(stderr, "[ethercat][cia402] invalid device configuration\n");
         return false;
     }
 
@@ -53,22 +65,32 @@ bool Cia402StandardPdoDevice::Configure(const DeviceConfiguration& configuration
                                              configuration_.vendor_id,
                                              configuration_.product_code);
     if (!slave_config_) {
+        std::fprintf(stderr,
+                     "[ethercat][cia402] failed to obtain slave configuration "
+                     "(alias=0x%04X, position=%u)\n",
+                     configuration_.alias,
+                     configuration_.position);
         return false;
     }
+    std::printf("[ethercat][cia402] slave configuration acquired\n");
 
     // 步骤 3：使用标准或派生类提供的同步表配置 SM/PDO 映射。
     const ec_sync_info_t* const syncs = PdoSyncs();
     if (!syncs || ecrt_slave_config_pdos(slave_config_, EC_END, syncs)) {
+        std::fprintf(stderr, "[ethercat][cia402] SM/PDO configuration failed\n");
         Reset();
         return false;
     }
+    std::printf("[ethercat][cia402] SM/PDO mapping configured\n");
 
     // 步骤 4：注册标准 PDO entry，由 Domain 计算实时过程数据偏移。
     BuildPdoEntryRegistrations();
     if (ecrt_domain_reg_pdo_entry_list(configuration.domain, pdo_entry_regs_.data())) {
+        std::fprintf(stderr, "[ethercat][cia402] PDO entry registration failed\n");
         Reset();
         return false;
     }
+    std::printf("[ethercat][cia402] PDO entries registered\n");
 
     // 步骤 5：仅对明确启用 DC 的从站配置 SYNC0。
     if (configuration_.enable_dc && ecrt_slave_config_dc(slave_config_,
@@ -77,16 +99,26 @@ bool Cia402StandardPdoDevice::Configure(const DeviceConfiguration& configuration
                                                          configuration_.sync0_shift_ns,
                                                          0,
                                                          0)) {
+        std::fprintf(stderr, "[ethercat][cia402] SYNC0 DC configuration failed\n");
         Reset();
         return false;
+    }
+    if (configuration_.enable_dc) {
+        std::printf(
+            "[ethercat][cia402] SYNC0 configured: assign=0x%04X, period=%u ns, shift=%d ns\n",
+            configuration_.dc_assign_activate,
+            configuration.cycle_time_ns,
+            configuration_.sync0_shift_ns);
     }
 
     // 步骤 6：执行具体伺服覆盖的厂商专有 SDO/PDO 初始化。
     if (!ConfigureDeviceSpecific(configuration)) {
+        std::fprintf(stderr, "[ethercat][cia402] device-specific configuration failed\n");
         Reset();
         return false;
     }
 
+    std::printf("[ethercat][cia402] device configuration completed\n");
     return true;
 }
 

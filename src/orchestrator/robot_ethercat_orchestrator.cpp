@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdio>
 #include <utility>
 #include <vector>
 
@@ -71,14 +72,29 @@ RobotEthercatOrchestrator::~RobotEthercatOrchestrator() {
 OrchestratorResult RobotEthercatOrchestrator::Initialize() {
     // 步骤 1：检查编排层生命周期以及建立主站所需的静态配置。
     if (master_ || configuration_.cycle_time_ns == 0 || device_definitions_.empty()) {
+        std::fprintf(stderr,
+                     "[ethercat][orchestrator] initialize rejected: initialized=%s, cycle=%u "
+                     "ns, devices=%zu\n",
+                     master_ ? "yes" : "no",
+                     configuration_.cycle_time_ns,
+                     device_definitions_.size());
         return OrchestratorResult::kInvalidState;
     }
+    std::printf(
+        "[ethercat][orchestrator] initialize master=%u, cycle=%u ns, dc_sync=%s, devices=%zu\n",
+        configuration_.master_index,
+        configuration_.cycle_time_ns,
+        configuration_.synchronize_dc ? "enabled" : "disabled",
+        device_definitions_.size());
 
     // 步骤 2：校验逻辑轴编号的范围、唯一性和连续性。
     std::size_t robot_axis_count = 0;
     if (!ValidateDeviceBindings(device_definitions_, robot_axis_count)) {
+        std::fprintf(stderr, "[ethercat][orchestrator] invalid device role or axis binding\n");
         return OrchestratorResult::kInvalidConfiguration;
     }
+    std::printf("[ethercat][orchestrator] device bindings valid, robot_axes=%zu\n",
+                robot_axis_count);
 
     // 步骤 3：创建不包含具体设备逻辑的通用 IgH 主站。
     master_ = std::make_unique<master::IghMaster>(configuration_.master_index,
@@ -88,9 +104,26 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
 
     // 步骤 4：按定义顺序创建设备，并将设备所有权统一移交给主站。
     bool reference_clock_registered = false;
-    for (const device::DeviceDefinition& definition : device_definitions_) {
+    for (std::size_t index = 0; index < device_definitions_.size(); ++index) {
+        const device::DeviceDefinition& definition = device_definitions_[index];
+        const device::DeviceBinding& binding = definition.binding();
+        if (binding.role == device::DeviceRole::kRobotAxis) {
+            std::printf(
+                "[ethercat][orchestrator] create device[%zu]: role=robot-axis, "
+                "logical_axis=%u, dc_reference=%s\n",
+                index,
+                binding.logical_axis_index,
+                definition.use_as_dc_reference_clock() ? "yes" : "no");
+        } else {
+            std::printf(
+                "[ethercat][orchestrator] create device[%zu]: role=generic, "
+                "logical_axis=none, dc_reference=%s\n",
+                index,
+                definition.use_as_dc_reference_clock() ? "yes" : "no");
+        }
         std::unique_ptr<device::IghDevice> ethercat_device = definition.CreateDevice();
         if (!ethercat_device) {
+            std::fprintf(stderr, "[ethercat][orchestrator] failed to create device[%zu]\n", index);
             Shutdown();
             return OrchestratorResult::kMasterError;
         }
@@ -101,12 +134,18 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
             // 只在初始化阶段确认轴设备能力，实时周期不执行 RTTI 判断。
             robot_axis_device = dynamic_cast<device::Cia402StandardPdoDevice*>(device_observer);
             if (!robot_axis_device) {
+                std::fprintf(stderr,
+                             "[ethercat][orchestrator] device[%zu] is bound as robot axis but "
+                             "does not implement standard CiA402 PDO\n",
+                             index);
                 Shutdown();
                 return OrchestratorResult::kInvalidConfiguration;
             }
         }
 
         if (master_->AddDevice(ethercat_device) != master::MasterResult::kSuccess) {
+            std::fprintf(
+                stderr, "[ethercat][orchestrator] failed to register device[%zu]\n", index);
             Shutdown();
             return OrchestratorResult::kMasterError;
         }
@@ -118,11 +157,15 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
         // 步骤 5：允许零个或一个 DC 参考设备，拒绝互相冲突的重复标记。
         if (definition.use_as_dc_reference_clock()) {
             if (reference_clock_registered) {
+                std::fprintf(stderr,
+                             "[ethercat][orchestrator] multiple DC reference devices defined\n");
                 Shutdown();
                 return OrchestratorResult::kInvalidConfiguration;
             }
             if (master_->SetReferenceClockDevice(*device_observer) !=
                 master::MasterResult::kSuccess) {
+                std::fprintf(stderr,
+                             "[ethercat][orchestrator] failed to register DC reference device\n");
                 Shutdown();
                 return OrchestratorResult::kMasterError;
             }
@@ -140,6 +183,8 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
     // 步骤 7：全部设备注册后，集中完成总线配置并激活实时通信。
     if (master_->Configure() != master::MasterResult::kSuccess ||
         master_->Activate() != master::MasterResult::kSuccess) {
+        std::fprintf(stderr,
+                     "[ethercat][orchestrator] master configuration or activation failed\n");
         Shutdown();
         return OrchestratorResult::kMasterError;
     }
@@ -147,10 +192,12 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
     // 步骤 8：主站激活后建立公共周期数据、CiA402 轴状态与 PDO 的内部桥接。
     pdo_bridge_ = std::make_unique<RobotPdoBridge>();
     if (!pdo_bridge_->Configure(configuration_.cycle_time_ns, std::move(robot_axes))) {
+        std::fprintf(stderr, "[ethercat][orchestrator] PDO bridge configuration failed\n");
         Shutdown();
         return OrchestratorResult::kInvalidConfiguration;
     }
 
+    std::printf("[ethercat][orchestrator] initialization completed\n");
     return OrchestratorResult::kSuccess;
 }
 
@@ -183,11 +230,20 @@ OrchestratorResult RobotEthercatOrchestrator::RunCycle(uint64_t application_time
 }
 
 void RobotEthercatOrchestrator::Shutdown() {
+    const bool had_resources = master_ || pdo_bridge_;
+    if (had_resources) {
+        std::printf("[ethercat][orchestrator] shutting down\n");
+    }
+
     // 步骤 1：先释放桥接层，清除其保存的全部设备观察指针。
     pdo_bridge_.reset();
 
     // 步骤 2：销毁主站，由其依次重置设备并释放全部 IgH 资源。
     master_.reset();
+
+    if (had_resources) {
+        std::printf("[ethercat][orchestrator] shutdown completed\n");
+    }
 }
 
 }  // namespace orchestrator

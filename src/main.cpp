@@ -20,6 +20,21 @@ namespace {
 volatile std::sig_atomic_t g_stop_requested = 0;  // 仅由信号处理函数写入的停止标志。
 
 /**
+ * @brief 设置当前 Linux 线程名称。
+ *
+ * 线程名称用于 top -H、ps -L 和调试器中区分主线程与 EtherCAT 周期线程。
+ * 设置失败只打印告警，不影响程序继续运行。
+ *
+ * @param name 不超过 15 个可见字符的线程名称。
+ */
+void SetCurrentThreadName(const char* name) {
+    const int result = pthread_setname_np(pthread_self(), name);
+    if (result != 0) {
+        std::fprintf(stderr, "warning: failed to set thread name '%s': %d\n", name, result);
+    }
+}
+
+/**
  * @brief 接收进程退出信号并请求主线程停止周期线程。
  *
  * @param signal 收到的 POSIX 信号编号。
@@ -96,10 +111,13 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
                     uint32_t cycle_time_ns,
                     std::atomic_bool& keep_running,
                     std::atomic_bool& cycle_failed) {
-    // 步骤 1：为当前线程配置尽力而为的实时调度属性。
+    // 步骤 1：命名周期线程，便于与只负责生命周期管理的主线程区分。
+    SetCurrentThreadName("ethercat-cycle");
+
+    // 步骤 2：为当前线程配置尽力而为的实时调度属性。
     ConfigureCurrentThreadRealtime();
 
-    // 步骤 2：读取单调时钟，并计算第一个绝对周期唤醒点。
+    // 步骤 3：读取单调时钟，并计算第一个绝对周期唤醒点。
     timespec wakeup_time{};
     if (clock_gettime(CLOCK_MONOTONIC, &wakeup_time) != 0) {
         std::perror("clock_gettime(CLOCK_MONOTONIC) failed");
@@ -110,7 +128,7 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
 
     AddNanoseconds(wakeup_time, cycle_time_ns);
     while (keep_running.load()) {
-        // 步骤 3：按绝对时间等待，避免相对 sleep 误差逐周期累积。
+        // 步骤 4：按绝对时间等待，避免相对 sleep 误差逐周期累积。
         const int sleep_result =
             clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup_time, nullptr);
         if (sleep_result != 0 && sleep_result != EINTR) {
@@ -123,7 +141,7 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
             continue;
         }
 
-        // 步骤 4：以本周期计划唤醒时间执行一次完整 EtherCAT 收发。
+        // 步骤 5：以本周期计划唤醒时间执行一次完整 EtherCAT 收发。
         if (application.RunCycle(ToNanoseconds(wakeup_time)) !=
             orchestrator::OrchestratorResult::kSuccess) {
             cycle_failed.store(true);
@@ -131,7 +149,7 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
             return;
         }
 
-        // 步骤 5：推进到下一周期的绝对唤醒点。
+        // 步骤 6：推进到下一周期的绝对唤醒点。
         AddNanoseconds(wakeup_time, cycle_time_ns);
     }
 }
@@ -155,11 +173,14 @@ void LockProcessMemory() {
  * @return 1 主站初始化或实时周期失败。
  */
 int main() {
-    // 步骤 1：注册安全停机信号，信号处理函数只负责提出停止请求。
+    // 步骤 1：命名主线程，便于与 EtherCAT 实时周期线程区分。
+    SetCurrentThreadName("robot-main");
+
+    // 步骤 2：注册安全停机信号，信号处理函数只负责提出停止请求。
     std::signal(SIGINT, HandleStopSignal);
     std::signal(SIGTERM, HandleStopSignal);
 
-    // 步骤 2：组装主站参数与具体设备定义；GSD620 同时作为 DC 参考设备。
+    // 步骤 3：组装主站参数与具体设备定义；GSD620 同时作为 DC 参考设备。
     orchestrator::RobotEthercatConfiguration configuration{};
     device::Gsd620Configuration gsd620_configuration{};
     device::DeviceSetup device_setup;
@@ -168,16 +189,16 @@ int main() {
     orchestrator::RobotEthercatOrchestrator application(configuration,
                                                         std::move(device_setup).Build());
 
-    // 步骤 3：统一注册从站、配置 PDO/DC，并激活 IgH master。
+    // 步骤 4：统一注册从站、配置 PDO/DC，并激活 IgH master。
     if (application.Initialize() != orchestrator::OrchestratorResult::kSuccess) {
         std::fprintf(stderr, "failed to initialize EtherCAT application\n");
         return 1;
     }
 
-    // 步骤 4：在启动周期线程前锁定进程内存。
+    // 步骤 5：在启动周期线程前锁定进程内存。
     LockProcessMemory();
 
-    // 步骤 5：创建唯一 EtherCAT 周期线程。
+    // 步骤 6：创建唯一 EtherCAT 周期线程。
     std::atomic_bool keep_running{true};   // 主线程和周期线程共享的运行状态。
     std::atomic_bool cycle_failed{false};  // 周期线程检测到不可恢复错误时置位。
     std::thread cycle_thread(RunCycleThread,
@@ -186,7 +207,7 @@ int main() {
                              std::ref(keep_running),
                              std::ref(cycle_failed));
 
-    // 步骤 6：主线程只监控停止请求，不参与 EtherCAT 周期收发。
+    // 步骤 7：主线程只监控停止请求，不参与 EtherCAT 周期收发。
     while (keep_running.load()) {
         if (g_stop_requested != 0) {
             keep_running.store(false);
@@ -195,11 +216,11 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
-    // 步骤 7：等待周期线程退出后释放主站和从站资源。
+    // 步骤 8：等待周期线程退出后释放主站和从站资源。
     cycle_thread.join();
     application.Shutdown();
 
-    // 步骤 8：区分周期故障退出与用户正常停止。
+    // 步骤 9：区分周期故障退出与用户正常停止。
     if (cycle_failed.load()) {
         std::fprintf(stderr, "EtherCAT cycle stopped because of an error\n");
         return 1;

@@ -239,6 +239,29 @@ public:
 
 private:
     /**
+     * @brief 检查并打印 Master、Domain 和从站配置状态变化。
+     *
+     * 本函数仅在状态首次出现或发生变化时打印。全部从站进入 OP 且
+     * Domain working counter 完整后，稳定运行期间不再产生状态日志。
+     *
+     * @param domain_state 最近一次过程数据交换的 Domain 状态。
+     */
+    void UpdateRuntimeDiagnostics(const ec_domain_state_t& domain_state) noexcept;
+
+    /**
+     * @brief 处理上一周期排队的 DC 同步监测结果。
+     *
+     * 只有通信状态稳定时才累计 DC 稳定周期。达到稳定条件后停止排队
+     * DC monitor，但仍继续执行正常的参考时钟和从站时钟同步。
+     */
+    void ProcessDcMonitorResult() noexcept;
+
+    /**
+     * @brief 清除周期状态日志和 DC 稳定性监测状态。
+     */
+    void ResetRuntimeDiagnostics() noexcept;
+
+    /**
    * @brief 判断指定从站对象是否已由当前主站注册。
    *
    * @param device 待查询的从站对象。
@@ -254,6 +277,17 @@ private:
     ec_domain_t* domain_ = nullptr;   // 由 master_ 管理的唯一 PDO domain。
     uint8_t* domain_pd_ = nullptr;    // 激活后取得的 domain process data 基地址。
     bool domain_data_valid_ = false;  // 最近一次 Domain working counter 是否完整。
+    bool runtime_diagnostics_initialized_ = false;  // 是否已保存首个周期状态快照。
+    bool communication_stable_ = false;       // Master、Domain 和全部从站是否稳定。
+    bool dc_monitor_pending_ = false;         // 是否等待上一周期的 DC monitor 结果。
+    bool dc_monitor_stable_ = false;          // DC 时差是否已连续满足稳定条件。
+    bool dc_monitor_error_reported_ = false;  // 是否已打印当前 DC monitor 错误。
+    uint32_t dc_stable_cycle_count_ = 0;      // 连续满足 DC 时差阈值的周期数。
+    uint32_t dc_monitor_sample_count_ = 0;    // 本轮 DC monitor 有效采样数。
+    ec_master_state_t last_master_state_{};   // 最近一次打印/保存的 Master 状态。
+    ec_domain_state_t last_domain_state_{};   // 最近一次打印/保存的 Domain 状态。
+    std::vector<ec_slave_config_state_t>
+        last_slave_states_{};  // 按设备注册顺序保存的从站配置状态。
     const device::IghDevice* reference_clock_device_ =
         nullptr;  // devices_ 中被选为 DC 参考时钟的观察指针。
     std::vector<std::unique_ptr<device::IghDevice>> devices_;  // 主站独占管理的从站适配器列表。
