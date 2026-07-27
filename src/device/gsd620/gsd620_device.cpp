@@ -1,4 +1,4 @@
-#include "device/gsd620_device.h"
+#include "device/gsd620/gsd620_device.h"
 
 namespace device {
 

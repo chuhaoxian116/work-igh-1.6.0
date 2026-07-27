@@ -12,7 +12,7 @@
 #include <sys/mman.h>
 #include <time.h>
 
-#include "device/gsd620_device.h"
+#include "device/gsd620/gsd620_device.h"
 #include "orchestrator/robot_ethercat_orchestrator.h"
 
 namespace {
