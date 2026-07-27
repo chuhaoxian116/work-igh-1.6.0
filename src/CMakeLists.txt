@@ -21,7 +21,29 @@ target_compile_options(igh_core PRIVATE
     -Wpedantic
 )
 
-# GSD620 具体从站适配：只链接 IgH 通用核心。
+# 标准 CiA402 PDO 设备适配：只负责 EtherCAT PDO/DC，不依赖状态机库。
+add_library(igh_device_cia402_standard STATIC
+    device/cia402_standard_pdo_device.cpp
+)
+add_library(igh::device_cia402_standard ALIAS igh_device_cia402_standard)
+
+target_include_directories(igh_device_cia402_standard
+    PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_link_libraries(igh_device_cia402_standard
+    PUBLIC
+    igh::core
+)
+
+target_compile_options(igh_device_cia402_standard PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+# GSD620 具体从站适配：复用标准 CiA402 PDO 设备库。
 add_library(igh_device_gsd620 STATIC
     device/gsd620_device.cpp
 )
@@ -34,7 +56,7 @@ target_include_directories(igh_device_gsd620
 
 target_link_libraries(igh_device_gsd620
     PUBLIC
-    igh::core
+    igh::device_cia402_standard
 )
 
 target_compile_options(igh_device_gsd620 PRIVATE
