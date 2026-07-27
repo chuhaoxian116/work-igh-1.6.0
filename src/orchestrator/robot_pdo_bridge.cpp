@@ -13,8 +13,10 @@ namespace {
  * @param cycle_data 当前公共周期数据。
  * @param runtime_axes 桥接层私有的 CiA402 轴状态。
  * @param operation 当前需要对每个有效轴执行的操作。
- * @return kSuccess 全部轴通信有效且没有操作返回 kError。
- * @return kError 至少一个轴通信无效或操作失败。
+ * 通信有效性只作为算法输入，不在输出转换路径中拦截算法命令。
+ *
+ * @return kSuccess 没有操作返回 kError。
+ * @return kError 至少一个轴的操作返回 kError。
  */
 template <typename Operation>
 RobotCommandResult ProcessRobotAxes(
@@ -27,8 +29,7 @@ RobotCommandResult ProcessRobotAxes(
 
     bool has_error = false;
     for (uint8_t axis_index = 0; axis_index < cycle_data.robot_axis_count; ++axis_index) {
-        if (cycle_data.robot_feedback[axis_index].communication_valid == 0 ||
-            operation(runtime_axes[axis_index]) == cia402::FbStatus::kError) {
+        if (operation(runtime_axes[axis_index]) == cia402::FbStatus::kError) {
             has_error = true;
         }
     }
@@ -85,19 +86,9 @@ void RobotPdoBridge::UpdateFeedbackFromPdo(bool domain_data_valid) noexcept {
         const bool communication_valid =
             domain_data_valid && binding.device->communication_operational();
         feedback.communication_valid = communication_valid ? 1U : 0U;
-        feedback.enabled = communication_valid && cia402::GetAxisState(runtime_axis) ==
-                                                      cia402::AxisState::kOperationEnabled
-                               ? 1U
-                               : 0U;
-
-        // 步骤 4：首次取得有效反馈时，以当前位置建立安全的初始运动目标。
-        if (communication_valid && !setpoint_initialized_[axis_index]) {
-            robot_interface::AxisSetpoint& setpoint = cycle_data_.robot_setpoints[axis_index];
-            setpoint.target_position = pdo.actual_position;
-            setpoint.target_velocity = 0;
-            setpoint.target_torque = 0;
-            setpoint_initialized_[axis_index] = true;
-        }
+        // 步骤 4：状态字与通信有效性分别上报，不因通信异常改写状态字解码结果。
+        feedback.enabled =
+            cia402::GetAxisState(runtime_axis) == cia402::AxisState::kOperationEnabled ? 1U : 0U;
     }
 }
 
@@ -165,7 +156,6 @@ void RobotPdoBridge::Reset() noexcept {
     bindings_.clear();
     cycle_data_ = {};
     runtime_axes_ = {};
-    setpoint_initialized_ = {};
     last_result_ = {};
     next_cycle_count_ = 0;
 }

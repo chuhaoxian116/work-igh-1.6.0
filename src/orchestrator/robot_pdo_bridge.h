@@ -24,7 +24,7 @@ struct RobotAxisPdoBinding {
  */
 enum class RobotCommandResult : uint8_t {
     kSuccess = 0,  // 本周期全部参与轴均正常处理。
-    kError = 1,    // 至少一个轴通信无效或 CiA402 操作失败。
+    kError = 1,    // 至少一个轴的 CiA402 命令转换失败。
 };
 
 /**
@@ -77,8 +77,8 @@ public:
      * @brief 将本周期 TxPDO 反馈导入公共周期数据和私有 CiA402 轴数据。
      *
      * 同时更新公共 AxisFeedback、AxisData 的 statusword/mode_display、
-     * enabled、communication_valid 和 cycle_count。每个轴首次获得有效
-     * 反馈时，将目标位置初始化为实际位置，避免默认零位置突跳。
+     * enabled、communication_valid 和 cycle_count。本函数不修改算法
+     * 拥有的 setpoint 或 service。
      *
      * @param domain_data_valid 最近一次 Domain working counter 是否完整。
      */
@@ -118,9 +118,7 @@ private:
     std::vector<RobotAxisPdoBinding> bindings_{};  // 按逻辑轴编号连续排列的设备绑定。
     robot_interface::RobotCycleData cycle_data_{};  // IgH 与后续算法交换的公共周期数据。
     std::array<cia402::AxisData, robot_interface::kMaxRobotAxisCount>
-        runtime_axes_{};  // 只在桥接层内部使用的 CiA402 轴状态。
-    std::array<bool, robot_interface::kMaxRobotAxisCount>
-        setpoint_initialized_{};  // 各轴目标位置是否已由有效反馈初始化。
+        runtime_axes_{};                     // 只在桥接层内部使用的 CiA402 轴状态。
     RobotCommandCycleResult last_result_{};  // 最近一次四类命令的独立结果。
     uint64_t next_cycle_count_ = 0;          // 下一个写入公共数据的周期号。
 };

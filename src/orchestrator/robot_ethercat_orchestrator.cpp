@@ -168,10 +168,10 @@ OrchestratorResult RobotEthercatOrchestrator::RunCycle(uint64_t application_time
     // 步骤 3：将 TxPDO 导入公共反馈和私有 CiA402 轴输入。
     pdo_bridge_->UpdateFeedbackFromPdo(master_->domain_data_valid());
 
-    // 步骤 4：算法同步回调后续插入此处，只接触 cycle_data() 公共数据。
+    // 步骤 4：算法同步回调后续插入此处；通信异常时也必须照常调用。
 
     // 步骤 5：执行各项多轴请求，并将控制字、模式和目标值导出到 RxPDO。
-    // 单周期命令 kError 由桥接层记录，不应因此中断 EtherCAT 周期收发。
+    // 通信状态和单周期命令结果都不得中断 PDO 写入与 EtherCAT 发送。
     pdo_bridge_->ProcessCommands();
 
     // 步骤 6：写入所有设备的 RxPDO，执行可选 DC 同步并发送本周期帧。

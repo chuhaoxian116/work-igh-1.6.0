@@ -213,7 +213,7 @@ public:
      * @brief 判断最近一次 Domain 过程数据交换是否完整。
      *
      * 该值在 ReceiveAndProcess() 调用 ecrt_domain_process() 后更新，仅供
-     * 主站内部 Runtime/PDO 桥接生成 communication_valid，不对外暴露
+     * 主站内部 PDO 桥接生成 communication_valid，不对外暴露
      * 完整健康快照。
      *
      * @return true 最近一次 Domain working counter 完整。
