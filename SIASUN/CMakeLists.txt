@@ -15,7 +15,6 @@ target_include_directories(siasun_core
 
 target_link_libraries(siasun_core PUBLIC
     "${ETHERCAT_LIBRARY}"
-    robot_runtime::robot_runtime
     cia402::cia402
     robot_interface::robot_interface
     pthread
@@ -43,7 +42,6 @@ target_link_libraries(igh_master_sinsun PRIVATE
 
 target_link_options(igh_master_sinsun PRIVATE
     "-Wl,-rpath,${ETHERCAT_LIBRARY_DIR}"
-    "-Wl,-rpath,${ROBOT_RUNTIME_LIBRARY_DIR}"
     "-Wl,-rpath,${CIA402_LIBRARY_DIR}"
 )
 

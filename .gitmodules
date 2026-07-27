@@ -1,9 +1,6 @@
 [submodule "third_party/cia402"]
 	path = third_party/cia402
 	url = https://github.com/chuhaoxian116/work-CiA402-SDK.git
-[submodule "third_party/robot_runtime"]
-	path = third_party/robot_runtime
-	url = https://github.com/chuhaoxian116/work-RobotRuntime-SDK.git
 [submodule "third_party/robot_interface"]
 	path = third_party/robot_interface
 	url = https://github.com/chuhaoxian116/work-RobotInterface-SDK.git

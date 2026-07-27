@@ -38,19 +38,9 @@ set(ROBOT_INTERFACE_INCLUDE_DIR "${ROBOT_INTERFACE_SDK_DIR}/include")
 set(ROBOT_INTERFACE_PUBLIC_HEADER
     "${ROBOT_INTERFACE_INCLUDE_DIR}/robot_data.h")
 
-set(ROBOT_RUNTIME_SDK_DIR
-    "${CMAKE_CURRENT_LIST_DIR}/third_party/robot_runtime")
-set(ROBOT_RUNTIME_INCLUDE_DIR "${ROBOT_RUNTIME_SDK_DIR}/include")
-set(ROBOT_RUNTIME_LIBRARY_DIR "${ROBOT_RUNTIME_SDK_DIR}/lib")
-set(ROBOT_RUNTIME_LIBRARY "${ROBOT_RUNTIME_LIBRARY_DIR}/librobot_runtime.so")
-set(ROBOT_RUNTIME_PUBLIC_HEADER
-    "${ROBOT_RUNTIME_INCLUDE_DIR}/robot_runtime/robot_runtime.h")
-
 if(NOT EXISTS "${CIA402_INCLUDE_DIR}/cia402/cia402.h" OR
    NOT EXISTS "${CIA402_LIBRARY}" OR
-   NOT EXISTS "${ROBOT_INTERFACE_PUBLIC_HEADER}" OR
-   NOT EXISTS "${ROBOT_RUNTIME_PUBLIC_HEADER}" OR
-   NOT EXISTS "${ROBOT_RUNTIME_LIBRARY}")
+   NOT EXISTS "${ROBOT_INTERFACE_PUBLIC_HEADER}")
     message(FATAL_ERROR
         "SDK submodules are not initialized. Run: "
         "git submodule update --init --recursive")
@@ -64,13 +54,6 @@ add_library(cia402::cia402 SHARED IMPORTED GLOBAL)
 set_target_properties(cia402::cia402 PROPERTIES
     IMPORTED_LOCATION "${CIA402_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${CIA402_INCLUDE_DIR}")
-
-add_library(robot_runtime::robot_runtime SHARED IMPORTED GLOBAL)
-set_target_properties(robot_runtime::robot_runtime PROPERTIES
-    IMPORTED_LOCATION "${ROBOT_RUNTIME_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${ROBOT_RUNTIME_INCLUDE_DIR}"
-    INTERFACE_LINK_LIBRARIES
-        "cia402::cia402;robot_interface::robot_interface")
 
 add_subdirectory(src)
 add_subdirectory(GSD620)
