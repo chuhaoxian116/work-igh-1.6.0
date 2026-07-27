@@ -147,6 +147,15 @@ const Cia402StandardPdoConfiguration& Cia402StandardPdoDevice::standard_configur
     return configuration_;
 }
 
+bool Cia402StandardPdoDevice::communication_operational() const noexcept {
+    if (!slave_config_) {
+        return false;
+    }
+
+    ec_slave_config_state_t state{};
+    return ecrt_slave_config_state(slave_config_, &state) == 0 && state.online && state.operational;
+}
+
 const ec_sync_info_t* Cia402StandardPdoDevice::PdoSyncs() const noexcept {
     return kSyncs;
 }

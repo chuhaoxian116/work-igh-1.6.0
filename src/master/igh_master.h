@@ -210,6 +210,18 @@ public:
     MasterState state() const { return state_; }
 
     /**
+     * @brief 判断最近一次 Domain 过程数据交换是否完整。
+     *
+     * 该值在 ReceiveAndProcess() 调用 ecrt_domain_process() 后更新，仅供
+     * 主站内部 Runtime/PDO 桥接生成 communication_valid，不对外暴露
+     * 完整健康快照。
+     *
+     * @return true 最近一次 Domain working counter 完整。
+     * @return false 尚未收到完整过程数据或主站未激活。
+     */
+    bool domain_data_valid() const noexcept { return domain_data_valid_; }
+
+    /**
      * @brief 获取 IgH 原生 master 观察指针。
      *
      * 调用方不得释放该指针，也不应绕过 IghMaster 直接执行周期调用。
@@ -239,8 +251,9 @@ private:
     uint32_t cycle_time_ns_ = 0;  // 设备配置使用的标称周期，单位为纳秒。
     MasterState state_ = MasterState::kInitial;                 // 当前主站生命周期状态。
     std::unique_ptr<ec_master_t, NativeMasterDeleter> master_;  // 独占的 IgH master 句柄。
-    ec_domain_t* domain_ = nullptr;  // 由 master_ 管理的唯一 PDO domain。
-    uint8_t* domain_pd_ = nullptr;   // 激活后取得的 domain process data 基地址。
+    ec_domain_t* domain_ = nullptr;   // 由 master_ 管理的唯一 PDO domain。
+    uint8_t* domain_pd_ = nullptr;    // 激活后取得的 domain process data 基地址。
+    bool domain_data_valid_ = false;  // 最近一次 Domain working counter 是否完整。
     const device::IghDevice* reference_clock_device_ =
         nullptr;  // devices_ 中被选为 DC 参考时钟的观察指针。
     std::vector<std::unique_ptr<device::IghDevice>> devices_;  // 主站独占管理的从站适配器列表。

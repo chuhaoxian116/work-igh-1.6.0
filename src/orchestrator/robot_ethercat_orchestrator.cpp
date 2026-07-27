@@ -4,8 +4,10 @@
 #include <array>
 #include <cstddef>
 #include <utility>
+#include <vector>
 
 #include "device/cia402_standard_pdo_device.h"
+#include "orchestrator/robot_pdo_bridge.h"
 #include "robot_data.h"
 
 namespace orchestrator {
@@ -81,7 +83,8 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
     // 步骤 3：创建不包含具体设备逻辑的通用 IgH 主站。
     master_ = std::make_unique<master::IghMaster>(configuration_.master_index,
                                                   configuration_.cycle_time_ns);
-    robot_axes_.reserve(robot_axis_count);
+    std::vector<RobotAxisPdoBinding> robot_axes;
+    robot_axes.reserve(robot_axis_count);
 
     // 步骤 4：按定义顺序创建设备，并将设备所有权统一移交给主站。
     bool reference_clock_registered = false;
@@ -109,7 +112,7 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
         }
 
         if (robot_axis_device) {
-            robot_axes_.push_back({definition.binding().logical_axis_index, robot_axis_device});
+            robot_axes.push_back({definition.binding().logical_axis_index, robot_axis_device});
         }
 
         // 步骤 5：允许零个或一个 DC 参考设备，拒绝互相冲突的重复标记。
@@ -128,9 +131,9 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
     }
 
     // 步骤 6：固定按逻辑轴编号遍历，为下一步 RobotCycleData 映射做准备。
-    std::sort(robot_axes_.begin(),
-              robot_axes_.end(),
-              [](const RobotAxisBinding& left, const RobotAxisBinding& right) {
+    std::sort(robot_axes.begin(),
+              robot_axes.end(),
+              [](const RobotAxisPdoBinding& left, const RobotAxisPdoBinding& right) {
                   return left.logical_axis_index < right.logical_axis_index;
               });
 
@@ -141,12 +144,19 @@ OrchestratorResult RobotEthercatOrchestrator::Initialize() {
         return OrchestratorResult::kMasterError;
     }
 
+    // 步骤 8：主站激活后建立公共周期数据、CiA402 轴状态与 PDO 的内部桥接。
+    pdo_bridge_ = std::make_unique<RobotPdoBridge>();
+    if (!pdo_bridge_->Configure(configuration_.cycle_time_ns, std::move(robot_axes))) {
+        Shutdown();
+        return OrchestratorResult::kInvalidConfiguration;
+    }
+
     return OrchestratorResult::kSuccess;
 }
 
 OrchestratorResult RobotEthercatOrchestrator::RunCycle(uint64_t application_time_ns) {
     // 步骤 1：确认主站已经成功激活。
-    if (!master_ || master_->state() != master::MasterState::kActive) {
+    if (!master_ || !pdo_bridge_ || master_->state() != master::MasterState::kActive) {
         return OrchestratorResult::kInvalidState;
     }
 
@@ -155,10 +165,16 @@ OrchestratorResult RobotEthercatOrchestrator::RunCycle(uint64_t application_time
         return OrchestratorResult::kMasterError;
     }
 
-    // 步骤 3：在输入已更新、输出尚未发送的窗口执行 Runtime 和业务数据映射。
-    // TODO: 后续在这里接入 Runtime、算法与设备周期数据交互。
+    // 步骤 3：将 TxPDO 导入公共反馈和私有 CiA402 轴输入。
+    pdo_bridge_->UpdateFeedbackFromPdo(master_->domain_data_valid());
 
-    // 步骤 4：写入所有设备的 RxPDO，执行可选 DC 同步并发送本周期帧。
+    // 步骤 4：算法同步回调后续插入此处，只接触 cycle_data() 公共数据。
+
+    // 步骤 5：执行各项多轴请求，并将控制字、模式和目标值导出到 RxPDO。
+    // 单周期命令 kError 由桥接层记录，不应因此中断 EtherCAT 周期收发。
+    pdo_bridge_->ProcessCommands();
+
+    // 步骤 6：写入所有设备的 RxPDO，执行可选 DC 同步并发送本周期帧。
     if (master_->QueueAndSend(configuration_.synchronize_dc) != master::MasterResult::kSuccess) {
         return OrchestratorResult::kMasterError;
     }
@@ -167,8 +183,8 @@ OrchestratorResult RobotEthercatOrchestrator::RunCycle(uint64_t application_time
 }
 
 void RobotEthercatOrchestrator::Shutdown() {
-    // 步骤 1：先清除主站所持设备的观察指针。
-    robot_axes_.clear();
+    // 步骤 1：先释放桥接层，清除其保存的全部设备观察指针。
+    pdo_bridge_.reset();
 
     // 步骤 2：销毁主站，由其依次重置设备并释放全部 IgH 资源。
     master_.reset();

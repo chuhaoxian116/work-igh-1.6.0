@@ -65,9 +65,10 @@ target_compile_options(igh_device_gsd620 PRIVATE
     -Wpedantic
 )
 
-# 通用机器人业务编排层：仅依赖 Master 和设备定义，不依赖具体从站。
+# 通用机器人业务编排层：组合 Master、标准 PDO 与内部命令桥接，不依赖具体从站。
 add_library(robot_ethercat_application STATIC
     orchestrator/robot_ethercat_orchestrator.cpp
+    orchestrator/robot_pdo_bridge.cpp
 )
 add_library(robot::ethercat_application ALIAS robot_ethercat_application)
 
@@ -82,6 +83,7 @@ target_link_libraries(robot_ethercat_application
     PRIVATE
     igh::device_cia402_standard
     robot_interface::robot_interface
+    cia402::cia402
 )
 
 target_compile_options(robot_ethercat_application PRIVATE
@@ -104,7 +106,8 @@ target_link_libraries(robot_ethercat_app PRIVATE
 )
 
 set_target_properties(robot_ethercat_app PROPERTIES
-    BUILD_RPATH "${ETHERCAT_LIBRARY_DIR}"
+    BUILD_RPATH
+        "${ETHERCAT_LIBRARY_DIR};${CIA402_LIBRARY_DIR}"
 )
 
 target_compile_options(robot_ethercat_app PRIVATE

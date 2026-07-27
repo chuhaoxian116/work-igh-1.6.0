@@ -52,7 +52,7 @@ struct Cia402StandardPdoData {
  * 对象时，可以覆盖 PdoSyncs()。厂商专有 SDO/PDO 初始化可以放入
  * ConfigureDeviceSpecific()。
  *
- * 本类不依赖 CiA402 状态机库、RobotRuntime 或算法接口。
+ * 本类不依赖 CiA402 状态机库、多轴命令调度或算法接口。
  */
 class Cia402StandardPdoDevice : public IghDevice {
 public:
@@ -120,6 +120,17 @@ public:
      * @return 从站身份与 DC 配置。
      */
     const Cia402StandardPdoConfiguration& standard_configuration() const noexcept;
+
+    /**
+     * @brief 判断从站配置当前是否在线并进入 OP 状态。
+     *
+     * 本接口只返回桥接层需要的最小通信布尔值，不提供完整 Slave 健康
+     * 快照。最终轴通信有效性还需要与 Domain working counter 组合判断。
+     *
+     * @return true 从站在线且 operational。
+     * @return false 未配置、离线、未进入 OP 或状态查询失败。
+     */
+    bool communication_operational() const noexcept;
 
 protected:
     /**

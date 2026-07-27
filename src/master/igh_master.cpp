@@ -129,7 +129,12 @@ MasterResult IghMaster::ReceiveAndProcess(uint64_t application_time_ns) {
     ecrt_master_receive(master_.get());
     ecrt_domain_process(domain_);
 
-    // 步骤 3：让每个设备从各自的 TxPDO 区域更新周期反馈。
+    // 步骤 3：更新内部 Domain 有效性，供 Runtime/PDO 桥接判断反馈是否可用。
+    ec_domain_state_t domain_state{};
+    domain_data_valid_ =
+        ecrt_domain_state(domain_, &domain_state) == 0 && domain_state.wc_state == EC_WC_COMPLETE;
+
+    // 步骤 4：让每个设备从各自的 TxPDO 区域更新周期反馈。
     for (const std::unique_ptr<device::IghDevice>& device : devices_) {
         device->ReadProcessData(domain_pd_);
     }
@@ -169,6 +174,7 @@ void IghMaster::Release() {
     master_.reset();
     domain_ = nullptr;
     domain_pd_ = nullptr;
+    domain_data_valid_ = false;
 
     // 步骤 3：保留设备对象，恢复为允许再次 Configure() 的初始状态。
     state_ = MasterState::kInitial;

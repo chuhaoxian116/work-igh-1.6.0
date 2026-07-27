@@ -3,16 +3,13 @@
 
 #include <cstdint>
 #include <memory>
-#include <vector>
 
 #include "device/device_setup.h"
 #include "master/igh_master.h"
 
-namespace device {
-class Cia402StandardPdoDevice;
-}
-
 namespace orchestrator {
+
+class RobotPdoBridge;
 
 /** @brief 机器人 EtherCAT 编排层的主站静态配置。 */
 struct RobotEthercatConfiguration {
@@ -34,8 +31,8 @@ enum class OrchestratorResult : uint8_t {
  *
  * 该类接收由应用入口组装的设备定义，通过通用 IghMaster 统一注册全部
  * 从站，并负责固定的生命周期和单次周期调用顺序：
- * ReceiveAndProcess() -> 业务数据处理位置 -> QueueAndSend()。
- * 当前版本不创建线程、不 sleep、不调用算法，也不调用 RobotRuntime。
+ * ReceiveAndProcess() -> PDO/命令桥接 -> QueueAndSend()。
+ * 当前版本不创建线程、不 sleep，也不调用算法。
  */
 class RobotEthercatOrchestrator {
 public:
@@ -73,8 +70,8 @@ public:
     /**
      * @brief 执行一次 EtherCAT 周期收发。
      *
-     * 由唯一的实时周期线程调用。当前实现只保留 PDO 读取与写入之间的业务
-     * 编排位置；后续 Runtime/算法桥接应加入该位置，不应加入 IghMaster。
+     * 由唯一的实时周期线程调用。读取 TxPDO 后更新公共反馈，预留算法同步
+     * 回调位置，再通过内部 CiA402 调度生成控制字并写入设备 RxPDO 缓冲。
      *
      * @param application_time_ns 本周期的单调时钟时间，单位为纳秒。
      * @return kSuccess 本周期 PDO 收发完成。
@@ -100,18 +97,10 @@ public:
     const master::IghMaster* master() const { return master_.get(); }
 
 private:
-    /**
-     * @brief 一个已注册机器人逻辑轴的实时 PDO 访问绑定。
-     */
-    struct RobotAxisBinding {
-        uint8_t logical_axis_index = 0;                     // RobotCycleData 逻辑轴下标。
-        device::Cia402StandardPdoDevice* device = nullptr;  // 主站持有的轴设备观察指针。
-    };
-
     RobotEthercatConfiguration configuration_{};      // 构造时确定的主站配置。
     device::DeviceDefinitions device_definitions_{};  // 可重复创建设备的通用定义。
     std::unique_ptr<master::IghMaster> master_;       // 编排层独占的通用 IgH 主站。
-    std::vector<RobotAxisBinding> robot_axes_{};  // 按逻辑轴编号排序的机器人轴绑定。
+    std::unique_ptr<RobotPdoBridge> pdo_bridge_;  // 对外隐藏 CiA402 的内部周期桥接。
 };
 
 }  // namespace orchestrator
