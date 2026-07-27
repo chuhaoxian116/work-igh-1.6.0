@@ -79,6 +79,9 @@ target_include_directories(robot_ethercat_application
 target_link_libraries(robot_ethercat_application
     PUBLIC
     igh::core
+    PRIVATE
+    igh::device_cia402_standard
+    robot_interface::robot_interface
 )
 
 target_compile_options(robot_ethercat_application PRIVATE

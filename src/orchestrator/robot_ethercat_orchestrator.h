@@ -3,9 +3,14 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "device/device_setup.h"
 #include "master/igh_master.h"
+
+namespace device {
+class Cia402StandardPdoDevice;
+}
 
 namespace orchestrator {
 
@@ -18,9 +23,10 @@ struct RobotEthercatConfiguration {
 
 /** @brief 编排层接口调用结果。 */
 enum class OrchestratorResult : uint8_t {
-    Success = 0,       // 本次调用成功。
-    InvalidState = 1,  // 当前生命周期状态不允许调用。
-    MasterError = 2,   // IghMaster 的配置、激活或周期调用失败。
+    kSuccess = 0,               // 本次调用成功。
+    kInvalidState = 1,          // 当前生命周期状态不允许调用。
+    kMasterError = 2,           // IghMaster 的配置、激活或周期调用失败。
+    kInvalidConfiguration = 3,  // 设备角色、逻辑轴编号或参考时钟定义无效。
 };
 
 /**
@@ -54,11 +60,13 @@ public:
      * @brief 创建主站，注册全部设备，完成 PDO/DC 配置并激活主站。
      *
      * 设备按照定义顺序创建和注册。最多允许一个定义标记为 DC 参考时钟；
-     * 空设备列表、多个参考时钟或设备工厂创建失败均视为初始化失败。
+     * 机器人轴编号必须从 0 连续排列、不能重复，并且对应设备必须继承
+     * Cia402StandardPdoDevice。
      *
-     * @return Success 主站和全部设备已激活。
-     * @return InvalidState 已初始化、配置周期为 0 或设备列表为空。
-     * @return MasterError 设备注册、配置或激活 IgH master 失败。
+     * @return kSuccess 主站和全部设备已激活。
+     * @return kInvalidState 已初始化、配置周期为 0 或设备列表为空。
+     * @return kInvalidConfiguration 设备角色、轴编号或参考时钟定义无效。
+     * @return kMasterError 设备注册、配置或激活 IgH master 失败。
      */
     OrchestratorResult Initialize();
 
@@ -69,9 +77,9 @@ public:
      * 编排位置；后续 Runtime/算法桥接应加入该位置，不应加入 IghMaster。
      *
      * @param application_time_ns 本周期的单调时钟时间，单位为纳秒。
-     * @return Success 本周期 PDO 收发完成。
-     * @return InvalidState 主站尚未激活。
-     * @return MasterError IgH 周期调用失败。
+     * @return kSuccess 本周期 PDO 收发完成。
+     * @return kInvalidState 主站尚未激活。
+     * @return kMasterError IgH 周期调用失败。
      */
     OrchestratorResult RunCycle(uint64_t application_time_ns);
 
@@ -92,9 +100,18 @@ public:
     const master::IghMaster* master() const { return master_.get(); }
 
 private:
+    /**
+     * @brief 一个已注册机器人逻辑轴的实时 PDO 访问绑定。
+     */
+    struct RobotAxisBinding {
+        uint8_t logical_axis_index = 0;                     // RobotCycleData 逻辑轴下标。
+        device::Cia402StandardPdoDevice* device = nullptr;  // 主站持有的轴设备观察指针。
+    };
+
     RobotEthercatConfiguration configuration_{};      // 构造时确定的主站配置。
     device::DeviceDefinitions device_definitions_{};  // 可重复创建设备的通用定义。
     std::unique_ptr<master::IghMaster> master_;       // 编排层独占的通用 IgH 主站。
+    std::vector<RobotAxisBinding> robot_axes_{};  // 按逻辑轴编号排序的机器人轴绑定。
 };
 
 }  // namespace orchestrator

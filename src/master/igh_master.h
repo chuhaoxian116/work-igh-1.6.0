@@ -13,17 +13,17 @@ namespace master {
 
 /** @brief IgH 主站对象的生命周期状态。 */
 enum class MasterState : uint8_t {
-    Initial = 0,     // 尚未请求 IgH master。
-    Configured = 1,  // PDO、DC 和 domain 已配置，尚未激活。
-    Active = 2,      // master 已激活，可进入实时周期。
+    kInitial = 0,     // 尚未请求 IgH master。
+    kConfigured = 1,  // PDO、DC 和 domain 已配置，尚未激活。
+    kActive = 2,      // master 已激活，可进入实时周期。
 };
 
 /** @brief 主站接口调用结果。 */
 enum class MasterResult : uint8_t {
-    Success = 0,          // 本次调用成功。
-    InvalidState = 1,     // 当前主站生命周期状态不允许调用。
-    InvalidArgument = 2,  // 参数为空、重复或不属于当前主站。
-    Error = 3,            // IgH 底层调用或设备适配器配置失败。
+    kSuccess = 0,          // 本次调用成功。
+    kInvalidState = 1,     // 当前主站生命周期状态不允许调用。
+    kInvalidArgument = 2,  // 参数为空、重复或不属于当前主站。
+    kError = 3,            // IgH 底层调用或设备适配器配置失败。
 };
 
 /**
@@ -34,17 +34,17 @@ enum class MasterResult : uint8_t {
  */
 template <typename DeviceType>
 struct DeviceAddResult {
-    MasterResult result = MasterResult::Error;  // 设备注册结果。
+    MasterResult result = MasterResult::kError;  // 设备注册结果。
     DeviceType* device = nullptr;  // 注册成功后的非拥有型设备观察指针。
 
     /**
    * @brief 判断设备是否注册成功。
    *
-   * @return true result 为 Success 且 device 有效。
+   * @return true result 为 kSuccess 且 device 有效。
    * @return false 设备注册失败。
    */
     explicit operator bool() const noexcept {
-        return result == MasterResult::Success && device != nullptr;
+        return result == MasterResult::kSuccess && device != nullptr;
     }
 };
 
@@ -92,13 +92,13 @@ public:
     /**
    * @brief 在 Configure() 前注册并接管一个设备适配器。
    *
-   * 仅在返回 Success 时所有权转移给 IghMaster；失败时 device 保持由
+   * 仅在返回 kSuccess 时所有权转移给 IghMaster；失败时 device 保持由
    * 调用方持有，调用方可自行处理或复用它。
    *
    * @param device 待注册的从站适配器智能指针。
-   * @return Success 主站已接管从站对象。
-   * @return InvalidState 主站已经配置或激活，不能新增从站。
-   * @return InvalidArgument device 为空或该对象已被注册。
+   * @return kSuccess 主站已接管从站对象。
+   * @return kInvalidState 主站已经配置或激活，不能新增从站。
+   * @return kInvalidArgument device 为空或该对象已被注册。
    */
     MasterResult AddDevice(std::unique_ptr<device::IghDevice>& device);
 
@@ -120,8 +120,8 @@ public:
         static_assert(!std::is_abstract<DeviceType>::value,
                       "DeviceType must be a concrete device adapter");
 
-        if (state_ != MasterState::Initial) {
-            return {MasterResult::InvalidState, nullptr};
+        if (state_ != MasterState::kInitial) {
+            return {MasterResult::kInvalidState, nullptr};
         }
 
         auto concrete_device = std::make_unique<DeviceType>(std::forward<Args>(args)...);
@@ -129,10 +129,10 @@ public:
         std::unique_ptr<device::IghDevice> base_device = std::move(concrete_device);
 
         const MasterResult result = AddDevice(base_device);
-        if (result != MasterResult::Success) {
+        if (result != MasterResult::kSuccess) {
             return {result, nullptr};
         }
-        return {MasterResult::Success, observer};
+        return {MasterResult::kSuccess, observer};
     }
 
     /**
@@ -142,9 +142,9 @@ public:
    * DC 参考时钟。
    *
    * @param device 已由当前主站注册的从站对象。
-   * @return Success 已设置 DC 参考时钟。
-   * @return InvalidState 主站已经配置或激活。
-   * @return InvalidArgument device 不属于当前主站。
+   * @return kSuccess 已设置 DC 参考时钟。
+   * @return kInvalidState 主站已经配置或激活。
+   * @return kInvalidArgument device 不属于当前主站。
    */
     MasterResult SetReferenceClockDevice(const device::IghDevice& device);
 
@@ -154,9 +154,9 @@ public:
    * 本函数依次调用每个 IghDevice::Configure()，并在设置了参考设备时
    * 选择其为 DC 参考时钟。任一步失败都会释放已请求的 IgH 资源。
    *
-   * @return Success 主站和所有从站配置完成，状态进入 Configured。
-   * @return InvalidState 主站不是 Initial 状态，或尚未注册任何从站。
-   * @return Error 请求 IgH master、创建 domain 或从站配置失败。
+   * @return kSuccess 主站和所有从站配置完成，状态进入 kConfigured。
+   * @return kInvalidState 主站不是 kInitial 状态，或尚未注册任何从站。
+   * @return kError 请求 IgH master、创建 domain 或从站配置失败。
    */
     MasterResult Configure();
 
@@ -165,9 +165,9 @@ public:
    *
    * 成功后才允许进入实时周期；激活失败时会释放 IgH 资源并重置设备。
    *
-   * @return Success 主站状态进入 Active。
-   * @return InvalidState 主站尚未完成 Configure()。
-   * @return Error 激活 master 或取得 domain 数据基地址失败。
+   * @return kSuccess 主站状态进入 kActive。
+   * @return kInvalidState 主站尚未完成 Configure()。
+   * @return kError 激活 master 或取得 domain 数据基地址失败。
    */
     MasterResult Activate();
 
@@ -177,8 +177,8 @@ public:
    * application_time_ns 由实时调度层提供。若不使用 DC，可传 0。
    *
    * @param application_time_ns 当前周期的单调时间，单位为纳秒。
-   * @return Success 已完成帧接收、domain 处理和全部设备输入 PDO 映射。
-   * @return InvalidState 主站未处于 Active 状态。
+   * @return kSuccess 已完成帧接收、domain 处理和全部设备输入 PDO 映射。
+   * @return kInvalidState 主站未处于 kActive 状态。
    */
     MasterResult ReceiveAndProcess(uint64_t application_time_ns);
 
@@ -189,8 +189,8 @@ public:
    * 时钟同步报文；调用频率由上层周期逻辑决定。
    *
    * @param synchronize_dc 是否在本周期同步参考时钟与从站时钟。
-   * @return Success 已完成全部设备输出 PDO 映射并发送帧。
-   * @return InvalidState 主站未处于 Active 状态。
+   * @return kSuccess 已完成全部设备输出 PDO 映射并发送帧。
+   * @return kInvalidState 主站未处于 kActive 状态。
    */
     MasterResult QueueAndSend(bool synchronize_dc);
 
@@ -237,7 +237,7 @@ private:
 
     uint32_t master_index_ = 0;   // 需要请求的 IgH master 编号。
     uint32_t cycle_time_ns_ = 0;  // 设备配置使用的标称周期，单位为纳秒。
-    MasterState state_ = MasterState::Initial;                  // 当前主站生命周期状态。
+    MasterState state_ = MasterState::kInitial;                 // 当前主站生命周期状态。
     std::unique_ptr<ec_master_t, NativeMasterDeleter> master_;  // 独占的 IgH master 句柄。
     ec_domain_t* domain_ = nullptr;  // 由 master_ 管理的唯一 PDO domain。
     uint8_t* domain_pd_ = nullptr;   // 激活后取得的 domain process data 基地址。

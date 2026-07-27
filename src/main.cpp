@@ -125,7 +125,7 @@ void RunCycleThread(orchestrator::RobotEthercatOrchestrator& application,
 
         // 步骤 4：以本周期计划唤醒时间执行一次完整 EtherCAT 收发。
         if (application.RunCycle(ToNanoseconds(wakeup_time)) !=
-            orchestrator::OrchestratorResult::Success) {
+            orchestrator::OrchestratorResult::kSuccess) {
             cycle_failed.store(true);
             keep_running.store(false);
             return;
@@ -163,13 +163,13 @@ int main() {
     orchestrator::RobotEthercatConfiguration configuration{};
     device::Gsd620Configuration gsd620_configuration{};
     device::DeviceSetup device_setup;
-    device_setup.AddReferenceClockDevice<device::Gsd620Device>(gsd620_configuration);
+    device_setup.AddRobotAxisReferenceClockDevice<device::Gsd620Device>(0, gsd620_configuration);
 
     orchestrator::RobotEthercatOrchestrator application(configuration,
                                                         std::move(device_setup).Build());
 
     // 步骤 3：统一注册从站、配置 PDO/DC，并激活 IgH master。
-    if (application.Initialize() != orchestrator::OrchestratorResult::Success) {
+    if (application.Initialize() != orchestrator::OrchestratorResult::kSuccess) {
         std::fprintf(stderr, "failed to initialize EtherCAT application\n");
         return 1;
     }
